@@ -47,7 +47,6 @@ export class Camada {
   private readonly scriptPath: string;
   private readonly fpPath: string;
   private readonly envSource: Record<string, string | undefined>;
-  private warned = false;
 
   constructor(opts: CamadaOptions = {}) {
     this.envSource = opts.env ?? process.env;
@@ -81,7 +80,6 @@ export class Camada {
 
   private handleInner(req: CamadaRequest, res: ServerResponse): boolean {
     if (this.disabled || !this.snap || !this.queue || !this.env) return false;
-    if (!this.warnOnce()) return false;
     const t0 = Date.now();
     this.snap.ensureFresh();
 
@@ -94,7 +92,7 @@ export class Camada {
     // enforce before anything else, beacon endpoints included — fail open while cold
     const v = this.snap.verdict({ ip, path });
     if (v.block) {
-      res.writeHead(403, { 'x-block-reason': v.reason!, 'x-block-version': v.version ?? '', 'content-type': 'text/plain' });
+      res.writeHead(403, { 'x-block-reason': v.reason ?? '', 'x-block-version': v.version ?? '', 'content-type': 'text/plain' });
       res.end('Forbidden');
       const ev = this.buildEvent(req, path, query, ip, { rid: randomUUID(), sid: null, newSession: false });
       ev.st = 403;   // blocked requests always ship: silent expiry makes blocks oscillate
@@ -136,11 +134,6 @@ export class Camada {
       }, undefined));
     }
     return false;
-  }
-
-  private warnOnce(): boolean {
-    if (!this.warned) this.warned = true;
-    return true;
   }
 
   private buildEvent(req: CamadaRequest, path: string, query: string, ip: string | null, o: { rid: string; sid: string | null; newSession: boolean }): WireEvent {
