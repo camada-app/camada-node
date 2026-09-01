@@ -4,7 +4,9 @@
 //   CAMADA_DISABLED=1                        kill switch, checked per request
 //   CAMADA_SERVERLESS=1                      lazy snapshot mode (no interval timer)
 //   CAMADA_TRUSTED_PROXY                     local override: none | vercel | hops:N | cidrs:a,b
-import { parseKey, type TrustedProxyConfig } from '@camada/core';
+import { parseKey, parseTrustedProxyEnv, type TrustedProxyConfig } from '@camada/core';
+
+export { parseTrustedProxyEnv };   // re-export: this was @camada/node's public surface before it moved to core
 
 export interface ResolvedEnv {
   ingestToken: string;
@@ -13,15 +15,6 @@ export interface ResolvedEnv {
   snapshotUrl: string;
   serverless: boolean;
   trustedProxy: TrustedProxyConfig | null;   // null = defer to server-delivered config
-}
-
-export function parseTrustedProxyEnv(v: string | undefined): TrustedProxyConfig | null {
-  if (!v) return null;
-  if (v === 'none') return { mode: 'none' };
-  if (v === 'vercel') return { mode: 'vercel' };
-  if (v.startsWith('hops:')) { const hops = Number(v.slice(5)); return Number.isInteger(hops) && hops >= 1 ? { mode: 'hops', hops } : null; }
-  if (v.startsWith('cidrs:')) { const cidrs = v.slice(6).split(',').map((s) => s.trim()).filter(Boolean); return cidrs.length ? { mode: 'cidrs', cidrs } : null; }
-  return null;
 }
 
 /** Returns null (SDK stays disabled, one log line) rather than throwing on bad config. */
