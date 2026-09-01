@@ -4,7 +4,7 @@
 //   envelope: a camada bug must never 5xx the customer (plan.md INT-2), and CAMADA_DISABLED=1
 //   bypasses the SDK entirely.
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId: Node 18 has no global crypto.subtle
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, hashUserId, guarded, logRateLimited,
   TAP_NODE, type TrustedProxyConfig, type WireEvent,
@@ -15,7 +15,7 @@ import { resolveEnv, type ResolvedEnv } from './env.js';
 const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns comparable across taps
 const SCRIPT_PATH = '/_cam/b.js';
 const FP_PATH = '/_cam/fp';
-const FP_MAX = 64 * 1024;
+const FP_MAX = 32 * 1024;   // matches the server's /fp cap: never accept what ingest will 413
 
 export interface CamadaOptions {
   env?: Record<string, string | undefined>;
@@ -55,6 +55,7 @@ export class Camada {
     this.fpPath = opts.fpPath ?? FP_PATH;
     this.env = resolveEnv(this.envSource);
     if (!this.env) return;                       // unconfigured: every entry point no-ops
+    if (this.envSource.CAMADA_DISABLED === '1') return;   // killed at boot: no poll timer, no exit hooks, truly silent
     this.snap = new SnapshotClient({
       url: this.env.snapshotUrl, token: this.env.snapToken,
       mode: this.env.serverless ? 'lazy' : 'timer',
@@ -117,7 +118,8 @@ export class Camada {
     const newSession = !sid;
     if (!sid) {
       sid = randomUUID();
-      res.setHeader('set-cookie', `${SESSION_COOKIE}=${sid}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax`);
+      const https = (req.socket as { encrypted?: boolean }).encrypted || req.headers['x-forwarded-proto'] === 'https';
+      res.setHeader('set-cookie', `${SESSION_COOKIE}=${sid}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
     }
     req.camada = { rid, ip, sid };
     res.setHeader('x-rid', rid);
@@ -186,7 +188,7 @@ export class Camada {
       if (this.disabled || !this.queue || !this.env) return;
       const ctx = (req as CamadaRequest).camada;
       void (async () => {
-        const uid = data?.user ? await hashUserId(data.user, this.env!.ingestToken) : null;
+        const uid = data?.user ? await hashUserId(data.user, this.env!.ingestToken, (globalThis.crypto ?? webcrypto).subtle) : null;
         this.queue!.push({ tap: TAP_NODE, et: event, uid, rid: ctx?.rid ?? null, sid: ctx?.sid ?? null, ip: ctx?.ip ?? null, ts: Date.now() });
       })().catch(logRateLimited);
     }, undefined);
