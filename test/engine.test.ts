@@ -125,7 +125,7 @@ describe('request capture', () => {
 });
 
 describe('first-party beacon', () => {
-  it('serves the IIFE at /_cam/b.js and relays /_cam/fp with the resolved client IP', async () => {
+  it('serves the IIFE at /_cam/b.js and batches /_cam/fp into the event queue as a sig:1 row with the resolved client IP', async () => {
     const a = fakeAnalyst();
     const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
     await loaded(engine);
@@ -137,9 +137,24 @@ describe('first-party beacon', () => {
     const fp = await fetch(`${app.url}/_cam/fp`, { method: 'POST', body: JSON.stringify({ rid: 'abc', tz: 'UTC' }), headers: { 'x-forwarded-for': '9.9.9.9' } });
     expect(fp.status).toBe(204);
     await settle();
-    expect(a.beacons).toHaveLength(1);
-    expect(a.beacons[0].clientIp).toBe('9.9.9.9');
-    expect(JSON.parse(a.beacons[0].body).tap).toBe('sdk-node');
+    await engine.queue!.flush();
+    expect(a.beacons).toHaveLength(0);   // no per-page-view POST: one request and one R2 put per flush at the analyst, not per beacon
+    const rows = a.events.flat() as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ sig: 1, rid: 'abc', tz: 'UTC', ip: '9.9.9.9', tap: 'sdk-node' });
+  });
+
+  it('drops an unparseable beacon body instead of shipping it', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await appWith(engine);
+    const fp = await fetch(`${app.url}/_cam/fp`, { method: 'POST', body: 'not-json' });
+    expect(fp.status).toBe(204);
+    await settle();
+    await engine.queue!.flush();
+    expect(a.events.flat()).toHaveLength(0);
+    expect(a.beacons).toHaveLength(0);
   });
 
   it('rejects oversized beacon posts', async () => {

@@ -148,8 +148,9 @@ export class Camada {
     );
   }
 
-  /** Reads the beacon POST (≤64 KB), answers 204 immediately, relays to ingest with the
-   *  trusted-proxy-resolved client IP — the mirror of the edge collector's /__fp path. */
+  /** Reads the beacon POST (≤64 KB), answers 204 immediately, and queues the beacon as a `sig: 1`
+   *  row with the trusted-proxy-resolved client IP: it rides the next event batch, so the analyst
+   *  sees one request per flush instead of one per page view. Junk bodies are dropped, never shipped. */
   private relayBeacon(req: IncomingMessage, res: ServerResponse, ip: string | null): void {
     const chunks: Buffer[] = [];
     let size = 0, dead = false;
@@ -162,14 +163,10 @@ export class Camada {
       if (dead) return;
       res.writeHead(204, { 'cache-control': 'no-store' });
       res.end();
-      let body = Buffer.concat(chunks).toString('utf8');
-      try { body = JSON.stringify({ ...JSON.parse(body), tap: TAP_NODE }); } catch { /* relay as-is; the server validates */ }
-      void this.fetchImpl(`${this.env!.ingestUrl}/fp`, {
-        method: 'POST',
-        headers: { 'x-tenant': this.env!.ingestToken, 'content-type': 'application/json', 'x-client-ip': ip || '' },
-        body,
-        signal: AbortSignal.timeout(2000),
-      }).catch(() => {});
+      let parsed: unknown;
+      try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return; }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+      this.queue!.push({ ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE });
     }, undefined));
     req.on('error', () => { try { res.destroy(); } catch { /* already gone */ } });
   }
