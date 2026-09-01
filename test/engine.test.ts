@@ -70,7 +70,7 @@ describe('request capture', () => {
     await engine.queue!.flush();
     const ev = (a.events.flat() as Array<Record<string, unknown>>)[0];
     expect(ev.st).toBe(200);
-    expect(typeof ev.lat).toBe('number');
+    expect(typeof ev.dur).toBe('number');
     expect(ev.p).toBe('/pricing');
     expect(ev.q).toBe('?ref=x');
     expect(ev.ns).toBe(1);
