@@ -28,9 +28,14 @@ export function fakeAnalyst(): FakeAnalyst {
       const u = String(url);
       if (u.endsWith('/snapshot')) {
         if (a.snapshotDown) throw new Error('ECONNREFUSED');
-        return new Response(new Uint8Array(BIN), {
+        // 200 body frame: [u32 LE meta-length][meta JSON][BLK3 bin]
+        const m = new TextEncoder().encode(META);
+        const f = new Uint8Array(4 + m.length + BIN.length);
+        new DataView(f.buffer).setUint32(0, m.length, true);
+        f.set(m, 4); f.set(new Uint8Array(BIN), 4 + m.length);
+        return new Response(f, {
           status: 200,
-          headers: { etag: `"${JSON.parse(META).version}"`, 'x-camada-meta': META, 'x-camada-config': JSON.stringify(a.config) },
+          headers: { etag: `"${JSON.parse(META).version}"`, 'x-camada-config': JSON.stringify(a.config) },
         });
       }
       if (a.ingestDown) throw new Error('ECONNREFUSED');
