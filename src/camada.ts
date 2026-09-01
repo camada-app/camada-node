@@ -128,7 +128,7 @@ export class Camada {
       res.on('finish', () => guarded(() => {
         const ev = this.buildEvent(req, path, query, ip, { rid, sid, newSession });
         ev.st = res.statusCode;
-        ev.lat = Date.now() - t0;
+        ev.dur = Date.now() - t0;
         if (req.route?.path) ev.rt = String(req.route.path);
         this.queue!.push(ev);
       }, undefined));
