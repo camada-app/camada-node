@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { version } from '../package.json';
 import type { Camada } from '../src/index.js';
 import iife from '@camada/browser/iife-string';
 import { fakeAnalyst, engineWith, loaded, serve, settle, BLOCKED_IP, type App } from './harness.js';
@@ -31,6 +32,7 @@ describe('inline blocking', () => {
     const evs = a.events.flat() as Array<Record<string, unknown>>;
     expect(evs).toHaveLength(1);
     expect(evs[0].st).toBe(403);
+    expect(evs[0].blk).toBe('ip4');
     expect(evs[0].ip).toBe(BLOCKED_IP);
     expect(evs[0].tap).toBe('sdk-node');
   });
@@ -55,6 +57,19 @@ describe('inline blocking', () => {
   });
 });
 
+describe('sdk identity', () => {
+  it('sends x-camada-sdk = @camada/node/<package version> on snapshot polls and event batches', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await appWith(engine);
+    await fetch(`${app.url}/`);
+    await engine.queue!.flush();
+    expect(new Set(a.sdkHeaders)).toEqual(new Set([`@camada/node/${version}`]));
+    expect(a.sdkHeaders.length).toBeGreaterThanOrEqual(2);   // ≥1 poll + 1 batch
+  });
+});
+
 describe('request capture', () => {
   it('captures on response-finish: real status, latency, wire header order, session', async () => {
     const a = fakeAnalyst();
@@ -70,6 +85,7 @@ describe('request capture', () => {
     await engine.queue!.flush();
     const ev = (a.events.flat() as Array<Record<string, unknown>>)[0];
     expect(ev.st).toBe(200);
+    expect(ev.blk).toBeUndefined();
     expect(typeof ev.dur).toBe('number');
     expect(ev.p).toBe('/pricing');
     expect(ev.q).toBe('?ref=x');
