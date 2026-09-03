@@ -11,6 +11,7 @@ import {
 } from '@camada/core';
 import iife from '@camada/browser/iife-string';
 import { resolveEnv, type ResolvedEnv } from './env.js';
+import { SDK_ID } from './version.js';
 
 const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns comparable across taps
 const SCRIPT_PATH = '/_cam/b.js';
@@ -59,9 +60,9 @@ export class Camada {
     this.snap = new SnapshotClient({
       url: this.env.snapshotUrl, token: this.env.snapToken,
       mode: this.env.serverless ? 'lazy' : 'timer',
-      refreshMs: opts.refreshMs, fetchImpl: this.fetchImpl,
+      refreshMs: opts.refreshMs, fetchImpl: this.fetchImpl, sdk: SDK_ID,
     });
-    this.queue = new EventQueue({ url: this.env.ingestUrl, token: this.env.ingestToken, fetchImpl: this.fetchImpl });
+    this.queue = new EventQueue({ url: this.env.ingestUrl, token: this.env.ingestToken, fetchImpl: this.fetchImpl, sdk: SDK_ID });
     this.snap.start();
     this.queue.installNodeExitFlush();
   }
@@ -97,6 +98,7 @@ export class Camada {
       res.end('Forbidden');
       const ev = this.buildEvent(req, path, query, ip, { rid: randomUUID(), sid: null, newSession: false });
       ev.st = 403;   // blocked requests always ship: silent expiry makes blocks oscillate
+      ev.blk = v.reason;   // SDK-01: the reason rides the event so the analyst counts SDK blocks, not the app's own 403s
       this.queue.push(ev);
       return true;
     }

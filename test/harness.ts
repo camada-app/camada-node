@@ -15,6 +15,7 @@ export interface FakeAnalyst {
   fetchImpl: typeof fetch;
   events: unknown[][];          // batches POSTed to /e
   beacons: Array<{ body: string; clientIp: string | null }>;
+  sdkHeaders: string[];         // x-camada-sdk seen on /snapshot and /e
   config: Record<string, unknown>;
   snapshotDown: boolean;
   ingestDown: boolean;
@@ -22,10 +23,11 @@ export interface FakeAnalyst {
 
 export function fakeAnalyst(): FakeAnalyst {
   const a: FakeAnalyst = {
-    events: [], beacons: [], snapshotDown: false, ingestDown: false,
+    events: [], beacons: [], sdkHeaders: [], snapshotDown: false, ingestDown: false,
     config: { tenant: 'acme', beacon: true, sample: 1, exclude: [], trusted_proxy: { mode: 'none' }, poll_seconds: 30 },
     fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url);
+      if (u.endsWith('/snapshot') || u.endsWith('/e')) a.sdkHeaders.push(new Headers(init?.headers).get('x-camada-sdk') ?? '');
       if (u.endsWith('/snapshot')) {
         if (a.snapshotDown) throw new Error('ECONNREFUSED');
         // 200 body frame: [u32 LE meta-length][meta JSON][BLK3 bin]

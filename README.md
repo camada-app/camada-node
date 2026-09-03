@@ -42,10 +42,13 @@ app.use(camadaKoa());
 
 ## What it does per request
 
-1. Refreshes the blocklist snapshot off-path (30 s poll, ETag; cold start fails open).
+1. Refreshes the blocklist snapshot off-path (30 s poll, ETag; cold start fails open). Every
+   poll and event batch carries `x-camada-sdk: @camada/node/<version>`.
 2. Resolves the client IP per your tenant's trusted-proxy config — raw `X-Forwarded-For` is
    never trusted without it (`CAMADA_TRUSTED_PROXY=hops:1|cidrs:…|vercel` overrides locally).
-3. Blocked ip/path → `403` with `x-block-reason` before your app; the event still ships.
+3. Blocked ip/path → `403` with `x-block-reason` before your app; the event still ships,
+   with `st: 403` and `blk: <reason>` (ip4|ip6|path) so the analyst counts SDK blocks apart
+   from your app's own 403s.
 4. Serves `/_cam/b.js` (the beacon, first-party — no third-party domain for ad-blockers or CSP
    to break) and relays `/_cam/fp` posts to ingest with the resolved client IP.
 5. Otherwise: sets `x-rid` + the `_sfp` session cookie, and on response-finish ships one
