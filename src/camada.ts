@@ -28,7 +28,7 @@ export interface CamadaOptions {
   refreshMs?: number;
   scriptPath?: string;
   fpPath?: string;
-  challenge?: boolean;           // enforce `challenge` verdicts with the first-party page (default true)
+  challenge?: boolean;           // enforce `challenge` verdicts with the first-party page (default true; CAMADA_CHALLENGE=0 also switches it off)
   challengePath?: string;        // where that page posts its solution (default /__camada/challenge)
   snapshotVersion?: 3 | 4;       // 3 opts out of the v4 allow/challenge sections
 }
@@ -65,7 +65,7 @@ export class Camada {
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.scriptPath = opts.scriptPath ?? SCRIPT_PATH;
     this.fpPath = opts.fpPath ?? FP_PATH;
-    this.challengeOn = opts.challenge !== false;
+    this.challengeOn = opts.challenge !== false && this.envSource.CAMADA_CHALLENGE !== '0';
     this.challengePath = opts.challengePath ?? CHALLENGE_PATH;
     this.env = resolveEnv(this.envSource);
     if (!this.env) return;                       // unconfigured: every entry point no-ops
@@ -212,12 +212,21 @@ export class Camada {
     } else {
       writeChallengeJson(res);
     }
-    const qi = target.indexOf('?');
-    const ev = this.buildEvent(req, qi === -1 ? target : target.slice(0, qi), qi === -1 ? '' : target.slice(qi), ip,
-      { rid: randomUUID(), sid: null, newSession: false });
-    ev.st = 403;
-    ev.blk = 'challenge';
-    this.queue!.push(ev);
+    // The response is out; telemetry must never be able to undo that (a throw here would make
+    // guarded() report the request as unhandled and let the app write to an ended response).
+    guarded(() => {
+      const qi = target.indexOf('?');
+      const ev = this.buildEvent(req, qi === -1 ? target : target.slice(0, qi), qi === -1 ? '' : target.slice(qi), ip,
+        { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
+      ev.st = 403;
+      ev.blk = 'challenge';
+      this.queue!.push(ev);
+    }, undefined);
+  }
+
+  /** The request's existing session, so challenge rows join the session that produced them. */
+  private sessionOf(req: IncomingMessage): string | null {
+    return cookieValue((req.headers.cookie as string) || '', SESSION_COOKIE);
   }
 
   /** POST from the challenge page: validate the nonce and the proof of work, set `_cch`, 302
@@ -237,7 +246,7 @@ export class Camada {
         'cache-control': 'no-store',
       });
       res.end();
-      const ev = this.buildEvent(req, this.challengePath, '', ip, { rid: randomUUID(), sid: null, newSession: false });
+      const ev = this.buildEvent(req, this.challengePath, '', ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
       ev.st = 200;
       ev.ch = 1;   // challenge passed (contract §A3 ingest field)
       this.queue!.push(ev);
