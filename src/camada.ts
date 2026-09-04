@@ -7,10 +7,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId: Node 18 has no global crypto.subtle
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, hashUserId, guarded, logRateLimited,
-  TAP_NODE, type TrustedProxyConfig, type WireEvent,
+  challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, CHALLENGE_COOKIE,
+  TAP_NODE, type ChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import iife from '@camada/browser/iife-string';
 import { resolveEnv, type ResolvedEnv } from './env.js';
+import {
+  CHALLENGE_PATH, nodeChallengeKit, readBody, isHttps, writeChallengePage, writeChallengeJson,
+} from './challenge.js';
 import { SDK_ID } from './version.js';
 
 const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns comparable across taps
@@ -24,6 +28,9 @@ export interface CamadaOptions {
   refreshMs?: number;
   scriptPath?: string;
   fpPath?: string;
+  challenge?: boolean;           // enforce `challenge` verdicts with the first-party page (default true)
+  challengePath?: string;        // where that page posts its solution (default /__camada/challenge)
+  snapshotVersion?: 3 | 4;       // 3 opts out of the v4 allow/challenge sections
 }
 
 interface CamadaRequest extends IncomingMessage {
@@ -47,6 +54,9 @@ export class Camada {
   private readonly fetchImpl: typeof fetch;
   private readonly scriptPath: string;
   private readonly fpPath: string;
+  private readonly challengeOn: boolean;
+  private readonly challengePath: string;
+  private readonly kit: ChallengeKit | null = null;
   private readonly envSource: Record<string, string | undefined>;
 
   constructor(opts: CamadaOptions = {}) {
@@ -54,15 +64,18 @@ export class Camada {
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.scriptPath = opts.scriptPath ?? SCRIPT_PATH;
     this.fpPath = opts.fpPath ?? FP_PATH;
+    this.challengeOn = opts.challenge !== false;
+    this.challengePath = opts.challengePath ?? CHALLENGE_PATH;
     this.env = resolveEnv(this.envSource);
     if (!this.env) return;                       // unconfigured: every entry point no-ops
     if (this.envSource.CAMADA_DISABLED === '1') return;   // killed at boot: no poll timer, no exit hooks, truly silent
     this.snap = new SnapshotClient({
       url: this.env.snapshotUrl, token: this.env.snapToken,
       mode: this.env.serverless ? 'lazy' : 'timer',
-      refreshMs: opts.refreshMs, fetchImpl: this.fetchImpl, sdk: SDK_ID,
+      refreshMs: opts.refreshMs, snapshotVersion: opts.snapshotVersion, fetchImpl: this.fetchImpl, sdk: SDK_ID,
     });
     this.queue = new EventQueue({ url: this.env.ingestUrl, token: this.env.ingestToken, fetchImpl: this.fetchImpl, sdk: SDK_ID });
+    this.kit = nodeChallengeKit(this.env.secret);
     this.snap.start();
     this.queue.installNodeExitFlush();
   }
@@ -101,6 +114,15 @@ export class Camada {
       ev.blk = v.reason;   // SDK-01: the reason rides the event so the analyst counts SDK blocks, not the app's own 403s
       this.queue.push(ev);
       return true;
+    }
+
+    // A challenge needs a resolved client IP: the nonce and the `_cch` cookie are bound to it,
+    // so without one a single solve would mint a cookie every unidentified client could
+    // present. No ip -> no challenge (fail open), the same stance ip rules take.
+    if (this.challengeOn && this.kit && ip) {
+      // The verify endpoint answers first: a challenged client must be able to reach it.
+      if (req.method === 'POST' && path === this.challengePath) { this.verifyChallenge(req, res, ip); return true; }
+      if (v.challenge && !this.challengePassed(req, ip)) { this.serveChallengeInner(req, res, ip, path + query); return true; }
     }
 
     if (this.beaconEnabled()) {
@@ -171,6 +193,64 @@ export class Camada {
       this.queue!.push({ ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE });
     }, undefined));
     req.on('error', () => { try { res.destroy(); } catch { /* already gone */ } });
+  }
+
+  private challengePassed(req: IncomingMessage, ip: string | null): boolean {
+    return !!this.kit?.tokenValid(ip, Date.now(), cookieValue((req.headers.cookie as string) || '', CHALLENGE_COOKIE));
+  }
+
+  /** 403 + the proof-of-work page (HTML navigations) or 403 JSON (everything else), plus the
+   *  `blk: "challenge"` event — a served challenge is reported like a block (contract §D2). */
+  private serveChallengeInner(req: CamadaRequest, res: ServerResponse, ip: string, target: string): void {
+    const to = safeReturnTo(target);
+    if (wantsHtml((req.headers.accept as string) ?? null, (req.headers['sec-fetch-dest'] as string) ?? null)) {
+      writeChallengePage(res, challengePage({ nonce: this.kit!.nonce(ip, Date.now()), action: this.challengePath, to }));
+    } else {
+      writeChallengeJson(res);
+    }
+    const qi = target.indexOf('?');
+    const ev = this.buildEvent(req, qi === -1 ? target : target.slice(0, qi), qi === -1 ? '' : target.slice(qi), ip,
+      { rid: randomUUID(), sid: null, newSession: false });
+    ev.st = 403;
+    ev.blk = 'challenge';
+    this.queue!.push(ev);
+  }
+
+  /** POST from the challenge page: validate the nonce and the proof of work, set `_cch`, 302
+   *  back to the (sanitised, same-site) original URL, and ship `{ st: 200, ch: 1 }`. */
+  private verifyChallenge(req: CamadaRequest, res: ServerResponse, ip: string): void {
+    readBody(req, (body) => guarded(() => {
+      const form = parseFormBody(body);
+      const to = safeReturnTo(form.to);
+      const now = Date.now();
+      if (!this.kit!.verify(ip, now, form.nonce, form.solution)) {
+        writeChallengePage(res, challengePage({ nonce: this.kit!.nonce(ip, now), action: this.challengePath, to }));
+        return;
+      }
+      res.writeHead(302, {
+        location: to,
+        'set-cookie': challengeCookie(this.kit!.issue(ip, now), isHttps(req)),
+        'cache-control': 'no-store',
+      });
+      res.end();
+      const ev = this.buildEvent(req, this.challengePath, '', ip, { rid: randomUUID(), sid: null, newSession: false });
+      ev.st = 200;
+      ev.ch = 1;   // challenge passed (contract §A3 ingest field)
+      this.queue!.push(ev);
+    }, undefined));
+  }
+
+  /** Serve the challenge for this request on demand — for a route the app wants to gate itself
+   *  (the example's /challenge-me). Returns false when the client already holds a valid `_cch`,
+   *  so the caller renders its own page. */
+  serveChallenge(req: IncomingMessage, res: ServerResponse): boolean {
+    return guarded(() => {
+      if (this.disabled || !this.kit || !this.queue) return false;
+      const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+      if (!ip || this.challengePassed(req, ip)) return false;   // unidentifiable client: fail open
+      this.serveChallengeInner(req as CamadaRequest, res, ip, req.url || '/');
+      return true;
+    }, false);
   }
 
   /** For HTML templates: the first-party beacon tag with the request's rid. */

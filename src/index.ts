@@ -23,6 +23,7 @@ export default {
   express: () => (req: IncomingMessage, res: ServerResponse, next: (err?: unknown) => void) => { if (!getDefault().handle(req, res)) next(); },
   handle: (req: IncomingMessage, res: ServerResponse) => getDefault().handle(req, res),
   scriptTag: (req: IncomingMessage) => getDefault().scriptTag(req),
+  serveChallenge: (req: IncomingMessage, res: ServerResponse) => getDefault().serveChallenge(req, res),
   track: (req: IncomingMessage, event: string, data?: { user?: string }) => getDefault().track(req, event, data),
   configure,
 };

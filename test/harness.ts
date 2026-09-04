@@ -6,10 +6,14 @@ import { join } from 'node:path';
 import { createCamada, type CamadaOptions } from '../src/index.js';
 
 // the same golden fixtures camada-core is pinned to, read through the file: symlink
-const FIX = join(process.cwd(), 'node_modules', '@camada/core', 'test', 'fixtures');
-export const BIN = readFileSync(join(FIX, 'snap-basic.bin'));
-export const META = JSON.stringify(JSON.parse(readFileSync(join(FIX, 'snap-basic.meta.json'), 'utf8')));
-export const BLOCKED_IP = '203.0.113.66';   // an ip4 entry in snap-basic
+const FIX = join(process.cwd(), 'node_modules', '@camada/core', 'test', 'fixtures', 'blk3');
+export const BIN = readFileSync(join(FIX, 'v3-basic.bin'));
+export const META = JSON.stringify(JSON.parse(readFileSync(join(FIX, 'v3-basic.meta.json'), 'utf8')));
+export const V4_BIN = readFileSync(join(FIX, 'v4-basic.bin'));
+export const V4_META = JSON.stringify(JSON.parse(readFileSync(join(FIX, 'v4-basic.meta.json'), 'utf8')));
+export const BLOCKED_IP = '203.0.113.66';   // an ip4 entry in v3-basic and v4-basic
+export const CHALLENGED_IP = '192.0.2.20';   // a challenge-only ip4 entry in v4-basic
+export const ALLOWED_IP = '10.0.0.7';       // allow-listed inside the blocked 10.0.0.0/8
 
 export interface FakeAnalyst {
   fetchImpl: typeof fetch;
@@ -19,25 +23,29 @@ export interface FakeAnalyst {
   config: Record<string, unknown>;
   snapshotDown: boolean;
   ingestDown: boolean;
+  v4: boolean;                  // serve the v4 golden container instead of v3
+  snapshotVersions: string[];   // x-camada-snapshot seen on /snapshot
 }
 
 export function fakeAnalyst(): FakeAnalyst {
   const a: FakeAnalyst = {
-    events: [], beacons: [], sdkHeaders: [], snapshotDown: false, ingestDown: false,
+    events: [], beacons: [], sdkHeaders: [], snapshotVersions: [], snapshotDown: false, ingestDown: false, v4: false,
     config: { tenant: 'acme', beacon: true, sample: 1, exclude: [], trusted_proxy: { mode: 'none' }, poll_seconds: 30 },
     fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url);
       if (u.endsWith('/snapshot') || u.endsWith('/e')) a.sdkHeaders.push(new Headers(init?.headers).get('x-camada-sdk') ?? '');
       if (u.endsWith('/snapshot')) {
+        a.snapshotVersions.push(new Headers(init?.headers).get('x-camada-snapshot') ?? '');
         if (a.snapshotDown) throw new Error('ECONNREFUSED');
         // 200 body frame: [u32 LE meta-length][meta JSON][BLK3 bin]
-        const m = new TextEncoder().encode(META);
-        const f = new Uint8Array(4 + m.length + BIN.length);
+        const meta = a.v4 ? V4_META : META, body = a.v4 ? V4_BIN : BIN;
+        const m = new TextEncoder().encode(meta);
+        const f = new Uint8Array(4 + m.length + body.length);
         new DataView(f.buffer).setUint32(0, m.length, true);
-        f.set(m, 4); f.set(new Uint8Array(BIN), 4 + m.length);
+        f.set(m, 4); f.set(new Uint8Array(body), 4 + m.length);
         return new Response(f, {
           status: 200,
-          headers: { etag: `"${JSON.parse(META).version}"`, 'x-camada-config': JSON.stringify(a.config) },
+          headers: { etag: `"${JSON.parse(meta).version}"`, 'x-camada-config': JSON.stringify(a.config) },
         });
       }
       if (a.ingestDown) throw new Error('ECONNREFUSED');
