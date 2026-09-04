@@ -204,4 +204,25 @@ describe('serveChallenge()', () => {
     expect(await second.text()).toContain('passed');
     await settle();
   });
+
+  it('ships exactly one event for the request it answers', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      if (engine.serveChallenge(req, res)) return;
+      res.writeHead(200).end('passed');
+    });
+    open.push(app, engine);
+    a.events.length = 0;
+
+    await fetch(`${app.url}/challenge-me`, { headers: { ...html, 'x-forwarded-for': '8.8.8.8' } });
+    await settle();
+    await engine.queue!.flush();
+    // The response-finish hook must not add a second, reason-less row for the same request.
+    expect(events(a).filter((e) => e.p === '/challenge-me')).toHaveLength(1);
+    expect(events(a).at(-1)).toMatchObject({ st: 403, blk: 'challenge' });
+  });
 });
