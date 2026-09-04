@@ -36,6 +36,7 @@ export interface CamadaOptions {
 interface CamadaRequest extends IncomingMessage {
   camada?: { rid: string; ip: string | null; sid: string };
   route?: { path?: string };     // Express fills this after routing
+  camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
 }
 
 const cookieValue = (cookie: string, name: string): string | null => {
@@ -152,6 +153,9 @@ export class Camada {
     const excluded = (cfg?.exclude || []).some((x) => path.startsWith(x));
     if (!excluded && Math.random() < (cfg?.sample ?? 1)) {
       res.on('finish', () => guarded(() => {
+        // serveChallenge() may have answered from inside the app, and it already shipped the
+        // `blk: "challenge"` row — one request, one event.
+        if (req.camadaChallenged) return;
         const ev = this.buildEvent(req, path, query, ip, { rid, sid, newSession });
         ev.st = res.statusCode;
         ev.dur = Date.now() - t0;
@@ -248,6 +252,7 @@ export class Camada {
       if (this.disabled || !this.kit || !this.queue) return false;
       const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
       if (!ip || this.challengePassed(req, ip)) return false;   // unidentifiable client: fail open
+      (req as CamadaRequest).camadaChallenged = true;
       this.serveChallengeInner(req as CamadaRequest, res, ip, req.url || '/');
       return true;
     }, false);
