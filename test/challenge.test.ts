@@ -107,6 +107,34 @@ describe('serving the challenge', () => {
     expect(a.snapshotVersions[0]).toBe('4');
   });
 
+  it('joins the challenge rows to the session that produced them', async () => {
+    const { a, engine, app } = await v4App();
+    await fetch(`${app.url}/cart`, { headers: { ...html, cookie: '_sfp=known-sid', 'x-forwarded-for': CHALLENGED_IP } });
+    await engine.queue!.flush();
+    expect(events(a).at(-1)).toMatchObject({ blk: 'challenge', sid: 'known-sid' });
+  });
+
+  it('refuses an oversized verify body instead of buffering it', async () => {
+    const { app } = await v4App();
+    const r = await verify(app, `nonce=x&solution=1&to=%2F&pad=${'a'.repeat(5000)}`);
+    expect(r.status).not.toBe(302);
+    expect(r.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('does nothing when CAMADA_CHALLENGE=0', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1', CAMADA_CHALLENGE: '0' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      res.writeHead(200).end('app');
+    });
+    open.push(app, engine);
+    const r = await fetch(`${app.url}/cart`, { headers: { ...html, 'x-forwarded-for': CHALLENGED_IP } });
+    expect(r.status).toBe(200);
+  });
+
   it('does nothing when challenge: false', async () => {
     const { app } = await v4App({ challenge: false });
     const r = await fetch(`${app.url}/cart`, { headers: { ...html, 'x-forwarded-for': CHALLENGED_IP } });
