@@ -11,6 +11,7 @@ export { parseTrustedProxyEnv };   // re-export: this was @camada/node's public 
 export interface ResolvedEnv {
   ingestToken: string;
   snapToken: string;
+  secret: string;                            // HMAC key for the challenge nonce/cookie — never leaves the process
   ingestUrl: string;
   snapshotUrl: string;
   serverless: boolean;
@@ -26,6 +27,7 @@ export function resolveEnv(env: Record<string, string | undefined> = process.env
   const ingestUrl = (env.CAMADA_INGEST_URL || 'https://in.camada.dev').replace(/\/$/, '');   // PLACEHOLDER default — confirm the production ingest domain before any npm publish
   return {
     ingestToken, snapToken, ingestUrl,
+    secret: env.CAMADA_KEY || `${ingestToken}.${snapToken}`,
     snapshotUrl: env.CAMADA_SNAPSHOT_URL || `${ingestUrl}/snapshot`,
     serverless: env.CAMADA_SERVERLESS === '1',
     trustedProxy: parseTrustedProxyEnv(env.CAMADA_TRUSTED_PROXY),
