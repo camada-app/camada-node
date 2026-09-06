@@ -67,6 +67,19 @@ App-context outcomes (the signals no edge tap can see; identifiers are HMAC-hash
 camada.track(req, 'login_failed', { user: email });
 ```
 
+The event name is free-form, but the analyst's app-context rules read a fixed vocabulary — use these names
+and the credential-stuffing, password-spray, account-aggregation, signup-velocity, carding and coupon rules
+fire on your app's own truth instead of path heuristics:
+
+| event | when |
+|---|---|
+| `login_failed` / `login_succeeded` | a password (or passwordless) login attempt settled; pass `{ user }` so attempts per account can be counted |
+| `signup` | an account was created |
+| `password_reset` | a reset was requested |
+| `mfa_failed` | a second factor was rejected |
+| `payment_failed` / `payment_succeeded` | a payment authorisation settled |
+| `coupon_failed` | a promo/voucher code was rejected |
+
 ## Operational notes
 
 - `CAMADA_DISABLED=1` — kill switch, checked per request.
