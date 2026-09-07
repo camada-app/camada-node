@@ -7,13 +7,24 @@ import { createCamada, type CamadaOptions } from '../src/index.js';
 
 // the same golden fixtures camada-core is pinned to, read through the file: symlink
 const FIX = join(process.cwd(), 'node_modules', '@camada/core', 'test', 'fixtures', 'blk3');
+const FIX5 = join(process.cwd(), 'node_modules', '@camada/core', 'test', 'fixtures', 'blk5');
 export const BIN = readFileSync(join(FIX, 'v3-basic.bin'));
 export const META = JSON.stringify(JSON.parse(readFileSync(join(FIX, 'v3-basic.meta.json'), 'utf8')));
 export const V4_BIN = readFileSync(join(FIX, 'v4-basic.bin'));
 export const V4_META = JSON.stringify(JSON.parse(readFileSync(join(FIX, 'v4-basic.meta.json'), 'utf8')));
+export const V5_BIN = readFileSync(join(FIX5, 'v5-rules.bin'));
+export const V5_META = JSON.stringify(JSON.parse(readFileSync(join(FIX5, 'v5-rules.meta.json'), 'utf8')));
 export const BLOCKED_IP = '203.0.113.66';   // an ip4 entry in v3-basic and v4-basic
 export const CHALLENGED_IP = '192.0.2.20';   // a challenge-only ip4 entry in v4-basic
 export const ALLOWED_IP = '10.0.0.7';       // allow-listed inside the blocked 10.0.0.0/8
+// v5-rules only (§D3): the ordered custom rules the golden container carries.
+export const RULE_BLOCKED_IP = '198.51.100.7';   // builtin:block, a manual-block entry
+export const SKIP_PATH = '/healthz';             // cr_00000000000a, skip — beats every side
+export const RULE_BLOCKED_PATH = '/api/v2/dump'; // cr_00000000000c, block by path regex
+export const WARN_UA = 'Scrapy/2.11 (+https://scrapy.org)';   // cr_00000000000e, warn
+export const BLOCKED_UA = 'curl/8.4.0';                       // cr_00000000000f, block
+export const BLOCKED_HEADER = 'x-api-key';                    // cr_000000000019, `header is` → block
+export const BLOCKED_HEADER_VALUE = 'leaked-key-1';
 
 export interface FakeAnalyst {
   fetchImpl: typeof fetch;
@@ -24,12 +35,13 @@ export interface FakeAnalyst {
   snapshotDown: boolean;
   ingestDown: boolean;
   v4: boolean;                  // serve the v4 golden container instead of v3
+  v5: boolean;                  // serve the v5 golden container (custom rules); wins over v4
   snapshotVersions: string[];   // x-camada-snapshot seen on /snapshot
 }
 
 export function fakeAnalyst(): FakeAnalyst {
   const a: FakeAnalyst = {
-    events: [], beacons: [], sdkHeaders: [], snapshotVersions: [], snapshotDown: false, ingestDown: false, v4: false,
+    events: [], beacons: [], sdkHeaders: [], snapshotVersions: [], snapshotDown: false, ingestDown: false, v4: false, v5: false,
     config: { tenant: 'acme', beacon: true, sample: 1, exclude: [], trusted_proxy: { mode: 'none' }, poll_seconds: 30 },
     fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url);
@@ -37,8 +49,11 @@ export function fakeAnalyst(): FakeAnalyst {
       if (u.endsWith('/snapshot')) {
         a.snapshotVersions.push(new Headers(init?.headers).get('x-camada-snapshot') ?? '');
         if (a.snapshotDown) throw new Error('ECONNREFUSED');
-        // 200 body frame: [u32 LE meta-length][meta JSON][BLK3 bin]
-        const meta = a.v4 ? V4_META : META, body = a.v4 ? V4_BIN : BIN;
+        // 200 body frame: [u32 LE meta-length][meta JSON][BLK bin]. Which container a tenant
+        // has is the server's business: a v5 asker is answered with v4 or v3 when that is all
+        // this tenant published, exactly as §D3 says.
+        const meta = a.v5 ? V5_META : a.v4 ? V4_META : META;
+        const body = a.v5 ? V5_BIN : a.v4 ? V4_BIN : BIN;
         const m = new TextEncoder().encode(meta);
         const f = new Uint8Array(4 + m.length + body.length);
         new DataView(f.buffer).setUint32(0, m.length, true);

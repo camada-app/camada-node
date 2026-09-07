@@ -102,8 +102,13 @@ describe('serving the challenge', () => {
     expect(r.status).toBe(200);
   });
 
-  it('asks the server for the v4 snapshot', async () => {
+  it('asks for the newest snapshot and takes the v4 one this tenant has', async () => {
     const { a } = await v4App();
+    expect(a.snapshotVersions[0]).toBe('5');   // §D3: a tenant without a v5 pair answers a v5 asker with v4
+  });
+
+  it('pins the container when the app asks for v4', async () => {
+    const { a } = await v4App({ snapshotVersion: 4 });
     expect(a.snapshotVersions[0]).toBe('4');
   });
 

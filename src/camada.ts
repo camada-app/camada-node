@@ -8,7 +8,7 @@ import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to ha
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, hashUserId, guarded, logRateLimited,
   challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, CHALLENGE_COOKIE,
-  TAP_NODE, type ChallengeKit, type TrustedProxyConfig, type WireEvent,
+  TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import iife from '@camada/browser/iife-string';
 import { resolveEnv, type ResolvedEnv } from './env.js';
@@ -30,7 +30,7 @@ export interface CamadaOptions {
   fpPath?: string;
   challenge?: boolean;           // enforce `challenge` verdicts with the first-party page (default true; CAMADA_CHALLENGE=0 also switches it off)
   challengePath?: string;        // where that page posts its solution (default /__camada/challenge)
-  snapshotVersion?: 3 | 4;       // 3 opts out of the v4 allow/challenge sections
+  snapshotVersion?: SnapshotVersion;   // 5 (default) also carries the tenant's ordered custom rules; 4 the allow/challenge sides only; 3 opts out of both
 }
 
 interface CamadaRequest extends IncomingMessage {
@@ -38,6 +38,14 @@ interface CamadaRequest extends IncomingMessage {
   route?: { path?: string };     // Express fills this after routing
   camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
 }
+
+/** The getter `header` conditions read (§D3). node:http lower-cases every incoming name and
+ *  the matcher always asks with a lower-cased one, so nothing has to be normalised here; a
+ *  header the client repeated arrives as an array and is joined the way the wire carried it. */
+const headerReader = (req: IncomingMessage) => (name: string): string | null => {
+  const v = req.headers[name];
+  return v == null ? null : Array.isArray(v) ? v.join(', ') : v;
+};
 
 const cookieValue = (cookie: string, name: string): string | null => {
   const src = '; ' + cookie;
@@ -105,17 +113,24 @@ export class Camada {
     const query = qi === -1 ? '' : rawUrl.slice(qi);
     const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
 
-    // enforce before anything else, beacon endpoints included — fail open while cold
-    const v = this.snap.verdict({ ip, path });
+    // enforce before anything else, beacon endpoints included — fail open while cold. The custom
+    // rules read the user agent and the request headers (§D3); without them every `ua` and
+    // `header` condition is false.
+    const v = this.snap.verdict({ ip, path, ua: req.headers['user-agent'], header: headerReader(req) });
     if (v.block) {
-      res.writeHead(403, { 'x-block-reason': v.reason ?? '', 'x-block-version': v.version ?? '', 'content-type': 'text/plain' });
+      const headers: Record<string, string> = { 'x-block-reason': v.reason ?? '', 'x-block-version': v.version ?? '', 'content-type': 'text/plain' };
+      if (v.rule) headers['x-block-rule'] = v.rule;   // a custom rule blocked: name it, so the customer knows which row to edit
+      res.writeHead(403, headers);
       res.end('Forbidden');
       const ev = this.buildEvent(req, path, query, ip, { rid: randomUUID(), sid: null, newSession: false });
       ev.st = 403;   // blocked requests always ship: silent expiry makes blocks oscillate
-      ev.blk = v.reason;   // SDK-01: the reason rides the event so the analyst counts SDK blocks, not the app's own 403s
+      ev.blk = v.reason;   // SDK-01: the reason rides the event so the analyst counts SDK blocks, not the app's own 403s ('rule' when a rule decided)
+      if (v.rule) ev.rl = v.rule;
       this.queue.push(ev);
       return true;
     }
+    // `warn` passes the request and only marks its event (below, on response-finish); a skip
+    // passes with nothing stamped at all — it is the absence of enforcement.
 
     // A challenge needs a resolved client IP: the nonce and the `_cch` cookie are bound to it,
     // so without one a single solve would mint a cookie every unidentified client could
@@ -160,6 +175,7 @@ export class Camada {
         ev.st = res.statusCode;
         ev.dur = Date.now() - t0;
         if (req.route?.path) ev.rt = String(req.route.path);
+        if (v.warn && v.rule) ev.wrn = v.rule;   // §D3: the warn rule that let this request through
         this.queue!.push(ev);
       }, undefined));
     }
