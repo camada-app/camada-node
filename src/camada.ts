@@ -192,7 +192,7 @@ export class Camada {
     );
   }
 
-  /** Reads the beacon POST (≤64 KB), answers 204 immediately, and queues the beacon as a `sig: 1`
+  /** Reads the beacon POST (≤32 KB), answers 204 immediately, and queues the beacon as a `sig: 1`
    *  row with the trusted-proxy-resolved client IP: it rides the next event batch, so the analyst
    *  sees one request per flush instead of one per page view. Junk bodies are dropped, never shipped. */
   private relayBeacon(req: IncomingMessage, res: ServerResponse, ip: string | null): void {
