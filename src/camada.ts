@@ -4,7 +4,7 @@
 //   envelope: a camada bug must never 5xx the customer (plan.md INT-2), and CAMADA_DISABLED=1
 //   bypasses the SDK entirely.
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId: Node 18 has no global crypto.subtle
+import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId explicitly, so the hash never depends on which global the host exposes
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, hashUserId, guarded, logRateLimited,
   challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, CHALLENGE_COOKIE,
