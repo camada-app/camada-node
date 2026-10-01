@@ -206,6 +206,38 @@ describe('client abort', () => {
   });
 });
 
+describe('session cookie survives the app setting its own', () => {
+  const styles: Record<string, (res: import('node:http').ServerResponse) => void> = {
+    'setHeader string': (res) => { res.setHeader('Set-Cookie', 'app=1; Path=/'); res.end('ok'); },
+    'setHeader array': (res) => { res.setHeader('set-cookie', ['app=1; Path=/', 'b=2']); res.end('ok'); },
+    'writeHead object': (res) => { res.writeHead(204, { 'Set-Cookie': 'app=1; Path=/' }); res.end(); },
+    'writeHead raw array': (res) => { res.writeHead(200, ['set-cookie', 'app=1; Path=/']); res.end('ok'); },
+    'appendHeader': (res) => { res.appendHeader('set-cookie', 'app=1; Path=/'); res.end('ok'); },
+    'setHeaders': (res) => { res.setHeaders(new Headers([['set-cookie', 'app=1; Path=/']])); res.end('ok'); },
+  };
+  for (const [name, write] of Object.entries(styles)) {
+    it(name, async () => {
+      const a = fakeAnalyst();
+      const engine = engineWith(a);
+      await loaded(engine);
+      const app = await serve((req, res) => { if (!engine.handle(req, res)) write(res); });
+      open.push(app, engine);
+      const cookies = (await fetch(`${app.url}/`)).headers.getSetCookie();
+      expect(cookies.filter((c) => c.startsWith('_sfp='))).toHaveLength(1);
+      expect(cookies).toContain('app=1; Path=/');
+    });
+  }
+
+  it("leaves an app's own _sfp alone", async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await serve((req, res) => { if (!engine.handle(req, res)) { res.setHeader('set-cookie', '_sfp=app; Path=/'); res.end(); } });
+    open.push(app, engine);
+    expect((await fetch(`${app.url}/`)).headers.getSetCookie()).toEqual(['_sfp=app; Path=/']);
+  });
+});
+
 describe('first-party beacon', () => {
   it('serves the IIFE at /_cam/b.js and batches /_cam/fp into the event queue as a sig:1 row with the resolved client IP', async () => {
     const a = fakeAnalyst();
