@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { connect } from 'node:net';
 import { version } from '../package.json';
 import type { Camada } from '../src/index.js';
 import iife from '@camada/browser/iife-string';
@@ -238,5 +239,88 @@ describe('fail-open envelope', () => {
     const engine = engineWith(a, { CAMADA_KEY: undefined as unknown as string });
     const app = await appWith(engine);
     expect((await fetch(`${app.url}/`)).status).toBe(200);
+  });
+});
+
+/** A raw WebSocket-style handshake: sends the upgrade request, then `hi` once the 101 is in; resolves with all it read. */
+function handshake(port: number, path: string, headers: Record<string, string> = {}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const sock = connect(port, '127.0.0.1', () => {
+      const extra = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join('');
+      sock.write(`GET ${path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n${extra}\r\n`);
+    });
+    let got = '';
+    sock.on('data', (d) => {
+      got += d;
+      if (got.includes('\r\n\r\n') && !got.includes('echo:') && got.startsWith('HTTP/1.1 101')) sock.write('hi');
+      if (got.includes('echo:hi') || (got.includes('\r\n\r\n') && !got.startsWith('HTTP/1.1 101'))) sock.end();
+    });
+    sock.on('close', () => resolve(got));
+    sock.on('error', reject);
+  });
+}
+
+describe('WebSocket upgrades (attach)', () => {
+  async function wsApp(engine: Camada, listener = true) {
+    const app = await appWith(engine);
+    if (listener) {
+      app.server.on('upgrade', (_req, socket) => {   // what ws does: answer 101 itself, then speak the protocol
+        socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+        socket.on('data', (d: Buffer) => socket.end(`echo:${d}`));
+      });
+    }
+    return app;
+  }
+  const shipped = async (a: ReturnType<typeof fakeAnalyst>, engine: Camada) => {
+    await settle();
+    await engine.queue!.flush();
+    return a.events.flat() as Array<Record<string, unknown>>;
+  };
+
+  it('ships exactly one st 101 event per upgrade and leaves the handshake to the app', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await wsApp(engine);
+    expect(engine.attach(engine.attach(app.server))).toBe(app.server);   // idempotent
+    const got = await handshake(app.port, '/ws?room=1', { cookie: '_sfp=known-sid' });
+    expect(got).toMatch(/^HTTP\/1\.1 101 Switching Protocols\r\n/);
+    expect(got).not.toContain('set-cookie');
+    expect(got.endsWith('echo:hi')).toBe(true);
+    const evs = await shipped(a, engine);
+    expect(evs).toHaveLength(1);
+    expect(evs[0]).toMatchObject({ st: 101, p: '/ws', q: '?room=1', sid: 'known-sid' });
+    expect(typeof evs[0].ts).toBe('number');
+    expect(typeof evs[0].dur).toBe('number');
+  });
+
+  it('leaves a server with no upgrade listener of its own exactly as it was', async () => {
+    // Node routes an upgrade request to the request handler when nothing listens for 'upgrade'; a
+    // listener of camada's would have claimed it and left the client hanging.
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await wsApp(engine, false);
+    engine.attach(app.server);
+    expect(app.server.listenerCount('upgrade')).toBe(0);
+    expect(await handshake(app.port, '/plain')).toMatch(/^HTTP\/1\.1 200 OK/);
+    expect((await shipped(a, engine)).map((e) => [e.p, e.st])).toEqual([['/plain', 200]]);
+  });
+
+  it('ships nothing for an excluded path and is inert when camada is', async () => {
+    const a = fakeAnalyst();
+    a.config = { ...a.config, exclude: ['/ws'] };
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await wsApp(engine);
+    engine.attach(app.server);
+    expect((await handshake(app.port, '/ws')).endsWith('echo:hi')).toBe(true);
+    expect(await shipped(a, engine)).toHaveLength(0);
+
+    const off = engineWith(fakeAnalyst(), { CAMADA_DISABLED: '1' });
+    open.push(off);
+    const emit = app.server.emit;
+    expect(off.attach(app.server)).toBe(app.server);
+    expect(app.server.emit).toBe(emit);
   });
 });
