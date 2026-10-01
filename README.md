@@ -52,9 +52,10 @@ app.use(camadaKoa());
    from your app's own 403s.
 4. Serves `/_cam/b.js` (the beacon, first-party — no third-party domain for ad-blockers or CSP
    to break) and relays `/_cam/fp` posts to ingest with the resolved client IP.
-5. Otherwise: sets `x-rid` + the `_sfp` session cookie, and on response-finish ships one
-   batched, redacted event (Authorization/Cookie values never leave the process; credential-
-   looking query values are scrubbed; see @camada/core).
+5. Otherwise: sets `x-rid` + the `_sfp` session cookie, and on response-finish ships one batched,
+   redacted event (Authorization/Cookie values never leave the process; credential-looking
+   query values are scrubbed; see @camada/core). A client that disconnects mid-response still
+   ships its one event, with the status set so far and `dur` up to the disconnect.
 
 ## Custom rules
 
