@@ -172,6 +172,7 @@ export class Camada {
         // `blk: "challenge"` row — one request, one event.
         if (req.camadaChallenged) return;
         const ev = this.buildEvent(req, path, query, ip, { rid, sid, newSession });
+        ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
         ev.st = res.statusCode;
         ev.dur = Date.now() - t0;
         if (req.route?.path) ev.rt = String(req.route.path);

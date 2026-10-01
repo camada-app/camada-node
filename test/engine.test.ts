@@ -10,6 +10,7 @@ afterEach(async () => { for (const o of open.splice(0)) { 'close' in o ? await o
 async function appWith(engine: Camada) {
   const app = await serve((req, res) => {
     if (engine.handle(req, res)) return;
+    if (req.url === '/slow') { res.writeHead(200); res.write('a'); setTimeout(() => res.end('b'), 150); return; }
     if (req.url?.startsWith('/api/')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); return; }
     res.writeHead(200, { 'content-type': 'text/html' });
     res.end(`<html><head>${engine.scriptTag(req)}</head><body>hi</body></html>`);
@@ -71,6 +72,21 @@ describe('sdk identity', () => {
 });
 
 describe('request capture', () => {
+  it('stamps ts at the request start, so [ts, ts + dur] is when the request ran', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await appWith(engine);
+    const t = Date.now();
+    await (await fetch(`${app.url}/slow`)).text();
+    await settle();
+    await engine.queue!.flush();
+    const ev = (a.events.flat() as Array<Record<string, unknown>>).find((e) => e.p === '/slow')!;
+    expect(ev.ts as number).toBeGreaterThanOrEqual(t);
+    expect(ev.ts as number).toBeLessThanOrEqual(t + 50);   // the start, not the finish ~150 ms later
+    expect(ev.dur as number).toBeGreaterThanOrEqual(140);
+  });
+
   it('captures on response-finish: real status, latency, wire header order, session', async () => {
     const a = fakeAnalyst();
     const engine = engineWith(a);
