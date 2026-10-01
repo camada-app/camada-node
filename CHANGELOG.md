@@ -24,6 +24,8 @@
 
 ### Fixed
 
+- Path rules match the canonical path (through `@camada/core` 0.5.0). A percent-encoded,
+  upper-cased or trailing-slash spelling of a blocked path used to slip past the block.
 - A first visit keeps its `_sfp` session cookie when the app sets its own cookies with
   `res.setHeader('set-cookie', …)` or `res.writeHead(…, { 'set-cookie': … })`. Express
   `res.cookie()` already worked.
