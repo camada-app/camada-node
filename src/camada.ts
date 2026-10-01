@@ -57,6 +57,21 @@ const cookieValue = (cookie: string, name: string): string | null => {
   return src.slice(start, j === -1 ? undefined : j);
 };
 
+/** Sets a first visit's `_sfp` and keeps it there: an app that replaces Set-Cookie through
+ *  setHeader (or writeHead, setHeaders, which route through it once any header is set) gets its
+ *  own cookies plus the session's, unless it set `_sfp` itself. appendHeader already keeps it. */
+function keepSessionCookie(res: ServerResponse, cookie: string): void {
+  const set = res.setHeader;
+  res.setHeader = function (this: ServerResponse, name: string, value: number | string | readonly string[]) {
+    if (typeof name === 'string' && name.toLowerCase() === 'set-cookie') {
+      const list = Array.isArray(value) ? value : [String(value)];
+      if (!list.some((c) => String(c).trimStart().startsWith(SESSION_COOKIE + '='))) value = [...list, cookie];
+    }
+    return set.call(this, name, value);
+  } as ServerResponse['setHeader'];
+  res.setHeader('set-cookie', cookie);
+}
+
 export class Camada {
   readonly env: ResolvedEnv | null;
   readonly snap: SnapshotClient | null = null;
@@ -160,7 +175,7 @@ export class Camada {
     if (!sid) {
       sid = randomUUID();
       const https = (req.socket as { encrypted?: boolean }).encrypted || req.headers['x-forwarded-proto'] === 'https';
-      res.setHeader('set-cookie', `${SESSION_COOKIE}=${sid}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
+      keepSessionCookie(res, `${SESSION_COOKIE}=${sid}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
     }
     req.camada = { rid, ip, sid };
     res.setHeader('x-rid', rid);
