@@ -5,7 +5,11 @@ latency, and the true wire header order no proxy position can see), enforces the
 blocklist inline before your app runs, and serves the fingerprint beacon first-party at
 `/_cam/b.js` + `/_cam/fp`. Fails open by design: a camada outage or bug never 5xxes your app.
 
-Not yet on npm — consumed via `file:` dependency from a sibling checkout.
+```sh
+npm install @camada/node
+```
+
+Requires Node 20 or later.
 
 ## Quickstart
 
