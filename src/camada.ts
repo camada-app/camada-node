@@ -168,10 +168,15 @@ export class Camada {
     const cfg = this.snap.config;
     const excluded = (cfg?.exclude || []).some((x) => path.startsWith(x));
     if (!excluded && Math.random() < (cfg?.sample ?? 1)) {
-      res.on('finish', () => guarded(() => {
+      // 'finish' when the response went out whole; 'close' alone when the client left first (an
+      // aborted SSE or download), which ships the status set so far and dur up to the abort — the
+      // fetch adapters' cancel semantics. 'close' also follows every 'finish': one event either way.
+      let shipped = false;
+      const ship = () => guarded(() => {
         // serveChallenge() may have answered from inside the app, and it already shipped the
         // `blk: "challenge"` row — one request, one event.
-        if (req.camadaChallenged) return;
+        if (shipped || req.camadaChallenged) return;
+        shipped = true;
         const ev = this.buildEvent(req, path, query, ip, { rid, sid, newSession });
         ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
         ev.st = res.statusCode;
@@ -179,7 +184,9 @@ export class Camada {
         if (req.route?.path) ev.rt = String(req.route.path);
         if (v.warn && v.rule) ev.wrn = v.rule;   // §D3: the warn rule that let this request through
         this.queue!.push(ev);
-      }, undefined));
+      }, undefined);
+      res.once('finish', ship);
+      res.once('close', ship);
     }
     return false;
   }

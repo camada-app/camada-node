@@ -157,6 +157,55 @@ describe('request capture', () => {
   });
 });
 
+describe('client abort', () => {
+  // A stream the client drops: Node emits 'close' and never 'finish'.
+  async function sseApp(engine: Camada) {
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      let n = 0;
+      const t = setInterval(() => { res.write(`data: ${n}\n\n`); if (++n === 8) { clearInterval(t); res.end(); } }, 50);
+      res.on('close', () => clearInterval(t));
+    });
+    open.push(app, engine);
+    return app;
+  }
+
+  it('ships exactly one event when the client aborts mid-stream, timed to the abort', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await sseApp(engine);
+    const ac = new AbortController();
+    const r = await fetch(`${app.url}/sse`, { signal: ac.signal });
+    const reader = r.body!.getReader();
+    await reader.read();
+    await settle(120);
+    ac.abort();
+    await settle(50);
+    await engine.queue!.flush();
+    const evs = (a.events.flat() as Array<Record<string, unknown>>).filter((e) => e.p === '/sse');
+    expect(evs).toHaveLength(1);
+    expect(evs[0].st).toBe(200);
+    expect(evs[0].dur as number).toBeGreaterThanOrEqual(100);
+    expect(evs[0].dur as number).toBeLessThan(350);   // the abort, not the 400 ms stream
+    app.server.closeAllConnections();
+  });
+
+  it('a stream read to the end still ships exactly one event', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await sseApp(engine);
+    await (await fetch(`${app.url}/sse`)).text();
+    await settle(50);
+    await engine.queue!.flush();
+    const evs = (a.events.flat() as Array<Record<string, unknown>>).filter((e) => e.p === '/sse');
+    expect(evs).toHaveLength(1);
+    expect(evs[0].dur as number).toBeGreaterThanOrEqual(350);
+  });
+});
+
 describe('first-party beacon', () => {
   it('serves the IIFE at /_cam/b.js and batches /_cam/fp into the event queue as a sig:1 row with the resolved client IP', async () => {
     const a = fakeAnalyst();
