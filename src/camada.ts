@@ -3,7 +3,7 @@
 //   endpoint), false when the app should proceed. Everything runs inside the fail-open
 //   envelope: a camada bug must never 5xx the customer (plan.md INT-2), and CAMADA_DISABLED=1
 //   bypasses the SDK entirely.
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId explicitly, so the hash never depends on which global the host exposes
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, hashUserId, guarded, logRateLimited,
@@ -21,6 +21,7 @@ const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns co
 const SCRIPT_PATH = '/_cam/b.js';
 const FP_PATH = '/_cam/fp';
 const FP_MAX = 32 * 1024;   // matches the server's /fp cap: never accept what ingest will 413
+const ATTACHED = Symbol.for('camada.attached');   // one wrap per server, however often attach() is called
 
 export interface CamadaOptions {
   env?: Record<string, string | undefined>;
@@ -268,6 +269,49 @@ export class Camada {
       ev.ch = 1;   // challenge passed (contract §A3 ingest field)
       this.queue!.push(ev);
     }, undefined));
+  }
+
+  /**
+   * Records the upgrades (WebSocket handshakes) a node:http or node:https server hands to its
+   * 'upgrade' listeners: Node never routes those through the request handler the middleware runs
+   * in. Each one ships one event with `st: 101` once the app's listeners have run. Observe only:
+   * the request is never blocked or challenged, nothing is written to the socket, no session
+   * cookie is minted, and a server with no 'upgrade' listener of its own behaves exactly as before
+   * (this wraps `server.emit` rather than adding a listener, which would claim every upgrade).
+   * Idempotent; returns the server. A handshake the WebSocket library then rejects still ships 101.
+   */
+  attach<S extends Server>(server: S): S {
+    guarded(() => {
+      const s = server as S & { [ATTACHED]?: true };
+      if (this.disabled || !this.queue || s[ATTACHED]) return;
+      s[ATTACHED] = true;
+      const emit = s.emit.bind(s) as (event: string | symbol, ...args: unknown[]) => boolean;
+      s.emit = ((event: string | symbol, ...args: unknown[]) => {
+        if (event !== 'upgrade') return emit(event, ...args);
+        const t0 = Date.now();
+        try {
+          return emit(event, ...args);
+        } finally {
+          guarded(() => this.shipUpgrade(args[0] as CamadaRequest, t0), undefined);
+        }
+      }) as S['emit'];
+    }, undefined);
+    return server;
+  }
+
+  private shipUpgrade(req: CamadaRequest, t0: number): void {
+    if (this.disabled || !this.queue) return;
+    const rawUrl = req.url || '/';
+    const qi = rawUrl.indexOf('?');
+    const path = qi === -1 ? rawUrl : rawUrl.slice(0, qi);
+    const cfg = this.snap?.config;
+    if ((cfg?.exclude || []).some((x) => path.startsWith(x)) || Math.random() >= (cfg?.sample ?? 1)) return;
+    const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+    const ev = this.buildEvent(req, path, qi === -1 ? '' : rawUrl.slice(qi), ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
+    ev.ts = t0;
+    ev.st = 101;
+    ev.dur = Date.now() - t0;
+    this.queue.push(ev);
   }
 
   /** Serve the challenge for this request on demand — for a route the app wants to gate itself

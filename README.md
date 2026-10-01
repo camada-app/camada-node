@@ -117,6 +117,24 @@ fire on your app's own truth instead of path heuristics:
 | `payment_failed` / `payment_succeeded` | a payment authorisation settled |
 | `coupon_failed` | a promo/voucher code was rejected |
 
+## WebSockets
+
+Node hands an upgrade request (a WebSocket handshake) to the server's `'upgrade'` listeners,
+never to the request handler the middleware runs in, so the middleware alone never sees one.
+Pass the server to `attach()` and each upgrade ships one event with `st: 101`:
+
+```js
+const server = app.listen(3000);            // Fastify: app.server · Nest: app.getHttpServer() · Koa: app.listen()
+camada.attach(server);                      // returns the server; calling it twice is harmless
+new WebSocketServer({ server });            // ws, socket.io, … attach before or after, either way
+```
+
+It only observes. The handshake stays your WebSocket library's: camada writes nothing to the
+socket, adds no delay, sets no session cookie (the event carries the visitor's existing `_sfp`),
+and never blocks or challenges an upgrade. A server with no `'upgrade'` listener of its own
+behaves exactly as before. The event is recorded when Node hands the upgrade over, so a
+handshake your library then rejects still ships `st: 101`.
+
 ## Operational notes
 
 - `CAMADA_DISABLED=1` — kill switch, checked per request.
