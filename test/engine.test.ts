@@ -80,11 +80,12 @@ describe('request capture', () => {
     const app = await appWith(engine);
     const t = Date.now();
     await (await fetch(`${app.url}/slow`)).text();
+    const tEnd = Date.now();
     await settle();
     await engine.queue!.flush();
     const ev = (a.events.flat() as Array<Record<string, unknown>>).find((e) => e.p === '/slow')!;
     expect(ev.ts as number).toBeGreaterThanOrEqual(t);
-    expect(ev.ts as number).toBeLessThanOrEqual(t + 50);   // the start, not the finish ~150 ms later
+    expect(ev.ts as number).toBeLessThanOrEqual(tEnd - 100);   // the start, not the finish: /slow's body takes ~150 ms, so a finish stamp lands >= tEnd - small
     expect(ev.dur as number).toBeGreaterThanOrEqual(140);
   });
 
@@ -177,18 +178,20 @@ describe('client abort', () => {
     await loaded(engine);
     const app = await sseApp(engine);
     const ac = new AbortController();
+    const tStart = Date.now();
     const r = await fetch(`${app.url}/sse`, { signal: ac.signal });
     const reader = r.body!.getReader();
     await reader.read();
     await settle(120);
     ac.abort();
+    const tAbort = Date.now();
     await settle(50);
     await engine.queue!.flush();
     const evs = (a.events.flat() as Array<Record<string, unknown>>).filter((e) => e.p === '/sse');
     expect(evs).toHaveLength(1);
     expect(evs[0].st).toBe(200);
     expect(evs[0].dur as number).toBeGreaterThanOrEqual(100);
-    expect(evs[0].dur as number).toBeLessThan(350);   // the abort, not the 400 ms stream
+    expect(evs[0].dur as number).toBeLessThanOrEqual(tAbort - tStart + 150);   // timed to the abort, not the 400 ms stream end
     app.server.closeAllConnections();
   });
 
