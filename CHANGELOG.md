@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased; follows 0.2.0)
+## 0.3.0 (2026-10-04; follows 0.2.0)
 
 ### Changed
 
