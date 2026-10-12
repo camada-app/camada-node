@@ -7,13 +7,13 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId explicitly, so the hash never depends on which global the host exposes
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, hashUserId, guarded, logRateLimited,
-  challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, CHALLENGE_COOKIE,
+  challengePage, challengeCookie, safeReturnTo, wantsHtml, CHALLENGE_COOKIE,
   TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import iife from '@camada/browser/iife-string';
 import { resolveEnv, type ResolvedEnv } from './env.js';
 import {
-  CHALLENGE_PATH, nodeChallengeKit, readBody, isHttps, writeChallengePage, writeChallengeJson,
+  CHALLENGE_PATH, nodeChallengeKit, readForm, isHttps, writeChallengePage, writeChallengeJson,
 } from './challenge.js';
 import { SDK_ID } from './version.js';
 
@@ -32,12 +32,19 @@ export interface CamadaOptions {
   challenge?: boolean;           // enforce `challenge` verdicts with the first-party page (default true; CAMADA_CHALLENGE=0 also switches it off)
   challengePath?: string;        // where that page posts its solution (default /__camada/challenge)
   snapshotVersion?: SnapshotVersion;   // 5 (default) also carries the tenant's ordered custom rules; 4 the allow/challenge sides only; 3 opts out of both
+  /** With CAMADA_SERVERLESS=1: handed every per-request event flush and snapshot refresh, so the
+   *  platform keeps the invocation alive until they finish (e.g. `waitUntil` from `@vercel/functions`). */
+  waitUntil?: (p: Promise<unknown>) => void;
 }
 
 interface CamadaRequest extends IncomingMessage {
+  originalUrl?: string;          // Express/Nest: the full URL; `url` loses the mount path inside app.use('/x', …)
+  body?: unknown;                // what a body parser mounted before camada left behind
   camada?: { rid: string; ip: string | null; sid: string };
   route?: { path?: string };     // Express fills this after routing
   camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
+  camadaOpen?: boolean;          // its event ships on response finish: a track() row until then rides that flush
+  camadaTracks?: Promise<void>[];   // track() rows still hashing (serverless: the finish flush waits for them)
 }
 
 /** The getter `header` conditions read (§D3). node:http lower-cases every incoming name and
@@ -47,6 +54,15 @@ const headerReader = (req: IncomingMessage) => (name: string): string | null => 
   const v = req.headers[name];
   return v == null ? null : Array.isArray(v) ? v.join(', ') : v;
 };
+
+/** Path and query as the client sent them. Express strips the mount path from `req.url` inside
+ *  `app.use(path, mw)` (Nest mounts module middleware that way, at '{*splat}' or '*'), so read
+ *  `originalUrl` first; plain node:http, Koa and Fastify's raw request only have `url`. */
+function pathAndQuery(req: CamadaRequest): { path: string; query: string } {
+  const raw = req.originalUrl || req.url || '/';
+  const qi = raw.indexOf('?');
+  return qi === -1 ? { path: raw, query: '' } : { path: raw.slice(0, qi), query: raw.slice(qi) };
+}
 
 const cookieValue = (cookie: string, name: string): string | null => {
   const src = '; ' + cookie;
@@ -83,10 +99,12 @@ export class Camada {
   private readonly challengePath: string;
   private readonly kit: ChallengeKit | null = null;
   private readonly envSource: Record<string, string | undefined>;
+  private readonly waitUntil?: (p: Promise<unknown>) => void;
 
   constructor(opts: CamadaOptions = {}) {
     this.envSource = opts.env ?? process.env;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.waitUntil = opts.waitUntil;
     this.scriptPath = opts.scriptPath ?? SCRIPT_PATH;
     this.fpPath = opts.fpPath ?? FP_PATH;
     this.challengeOn = opts.challenge !== false && this.envSource.CAMADA_CHALLENGE !== '0';
@@ -113,6 +131,25 @@ export class Camada {
 
   private beaconEnabled(): boolean { return this.snap?.config?.beacon !== false; }
 
+  /** Queues a row. With CAMADA_SERVERLESS=1 it also starts the POST now: the platform freezes the
+   *  process once the response is out, so the 15 s interval would never run. Never throws. */
+  private enqueue(row: unknown, req?: CamadaRequest): void {
+    const q = this.queue!;
+    q.push(row);
+    if (!this.env?.serverless) return;
+    if (req?.camadaOpen) return;   // a track() row while the response is open: the finish flush carries it
+    guarded(() => {
+      // One POST per request: the response-finish flush first waits for that request's track()
+      // rows still hashing. flush() is single-in-flight, so a row queued while a POST was
+      // finishing rides a second one.
+      const tracks = req?.camadaTracks ?? [];
+      const p = Promise.allSettled(tracks)
+        .then(() => q.flush())
+        .then(() => (q.size > 0 ? q.flush() : undefined));
+      this.waitUntil?.(p);
+    }, undefined);
+  }
+
   /** True when camada fully handled the request. Synchronous; never throws. */
   handle(req: IncomingMessage, res: ServerResponse): boolean {
     return guarded(() => this.handleInner(req as CamadaRequest, res), false);
@@ -121,12 +158,9 @@ export class Camada {
   private handleInner(req: CamadaRequest, res: ServerResponse): boolean {
     if (this.disabled || !this.snap || !this.queue || !this.env) return false;
     const t0 = Date.now();
-    this.snap.ensureFresh();
+    this.snap.ensureFresh(this.env.serverless ? this.waitUntil : undefined);
 
-    const rawUrl = req.url || '/';
-    const qi = rawUrl.indexOf('?');
-    const path = qi === -1 ? rawUrl : rawUrl.slice(0, qi);
-    const query = qi === -1 ? '' : rawUrl.slice(qi);
+    const { path, query } = pathAndQuery(req);
     const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
 
     // enforce before anything else, beacon endpoints included — fail open while cold. The custom
@@ -142,7 +176,7 @@ export class Camada {
       ev.st = 403;   // blocked requests always ship: silent expiry makes blocks oscillate
       ev.blk = v.reason;   // SDK-01: the reason rides the event so the analyst counts SDK blocks, not the app's own 403s ('rule' when a rule decided)
       if (v.rule) ev.rl = v.rule;
-      this.queue.push(ev);
+      this.enqueue(ev);
       return true;
     }
     // `warn` passes the request and only marks its event (below, on response-finish); a skip
@@ -187,7 +221,9 @@ export class Camada {
       // aborted SSE or download), which ships the status set so far and dur up to the abort — the
       // fetch adapters' cancel semantics. 'close' also follows every 'finish': one event either way.
       let shipped = false;
+      req.camadaOpen = true;
       const ship = () => guarded(() => {
+        req.camadaOpen = false;
         // serveChallenge() may have answered from inside the app, and it already shipped the
         // `blk: "challenge"` row — one request, one event.
         if (shipped || req.camadaChallenged) return;
@@ -198,7 +234,7 @@ export class Camada {
         ev.dur = Date.now() - t0;
         if (req.route?.path) ev.rt = String(req.route.path);
         if (v.warn && v.rule) ev.wrn = v.rule;   // §D3: the warn rule that let this request through
-        this.queue!.push(ev);
+        this.enqueue(ev, req);
       }, undefined);
       res.once('finish', ship);
       res.once('close', ship);
@@ -218,8 +254,24 @@ export class Camada {
 
   /** Reads the beacon POST (≤32 KB), answers 204 immediately, and queues the beacon as a `sig: 1`
    *  row with the trusted-proxy-resolved client IP: it rides the next event batch, so the analyst
-   *  sees one request per flush instead of one per page view. Junk bodies are dropped, never shipped. */
-  private relayBeacon(req: IncomingMessage, res: ServerResponse, ip: string | null): void {
+   *  sees one request per flush instead of one per page view. Junk bodies are dropped, never shipped.
+   *  A body parser mounted before camada (express.json(), always on Nest) has already drained the
+   *  stream: its `req.body` is used instead, and the request is answered either way. */
+  private relayBeacon(req: CamadaRequest, res: ServerResponse, ip: string | null): void {
+    const accept = (parsed: unknown) => {
+      res.writeHead(204, { 'cache-control': 'no-store' });
+      res.end();
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Buffer.isBuffer(parsed)) return;
+      this.enqueue({ ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE });
+    };
+    const fromText = (text: string) => { try { return JSON.parse(text) as unknown; } catch { return null; } };
+    if (req.readableEnded) {
+      const b = req.body;
+      const text = typeof b === 'string' ? b : Buffer.isBuffer(b) ? b.toString('utf8') : null;
+      if ((text ?? (b && typeof b === 'object' ? JSON.stringify(b) : '')).length > FP_MAX) { res.writeHead(413).end(); return; }
+      accept(text === null ? b : fromText(text));
+      return;
+    }
     const chunks: Buffer[] = [];
     let size = 0, dead = false;
     req.on('data', (c: Buffer) => {
@@ -229,12 +281,7 @@ export class Camada {
     });
     req.on('end', () => guarded(() => {
       if (dead) return;
-      res.writeHead(204, { 'cache-control': 'no-store' });
-      res.end();
-      let parsed: unknown;
-      try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return; }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
-      this.queue!.push({ ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE });
+      accept(fromText(Buffer.concat(chunks).toString('utf8')));
     }, undefined));
     req.on('error', () => { try { res.destroy(); } catch { /* already gone */ } });
   }
@@ -260,7 +307,7 @@ export class Camada {
         { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
       ev.st = 403;
       ev.blk = 'challenge';
-      this.queue!.push(ev);
+      this.enqueue(ev);
     }, undefined);
   }
 
@@ -272,8 +319,7 @@ export class Camada {
   /** POST from the challenge page: validate the nonce and the proof of work, set `_cch`, 302
    *  back to the (sanitised, same-site) original URL, and ship `{ st: 200, ch: 1 }`. */
   private verifyChallenge(req: CamadaRequest, res: ServerResponse, ip: string): void {
-    readBody(req, (body) => guarded(() => {
-      const form = parseFormBody(body);
+    readForm(req, (form) => guarded(() => {
       const to = safeReturnTo(form.to);
       const now = Date.now();
       if (!this.kit!.verify(ip, now, form.nonce, form.solution)) {
@@ -289,7 +335,7 @@ export class Camada {
       const ev = this.buildEvent(req, this.challengePath, '', ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
       ev.st = 200;
       ev.ch = 1;   // challenge passed (contract §A3 ingest field)
-      this.queue!.push(ev);
+      this.enqueue(ev);
     }, undefined));
   }
 
@@ -323,17 +369,15 @@ export class Camada {
 
   private shipUpgrade(req: CamadaRequest, t0: number): void {
     if (this.disabled || !this.queue) return;
-    const rawUrl = req.url || '/';
-    const qi = rawUrl.indexOf('?');
-    const path = qi === -1 ? rawUrl : rawUrl.slice(0, qi);
+    const { path, query } = pathAndQuery(req);
     const cfg = this.snap?.config;
     if ((cfg?.exclude || []).some((x) => path.startsWith(x)) || Math.random() >= (cfg?.sample ?? 1)) return;
     const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
-    const ev = this.buildEvent(req, path, qi === -1 ? '' : rawUrl.slice(qi), ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
+    const ev = this.buildEvent(req, path, query, ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
     ev.ts = t0;
     ev.st = 101;
     ev.dur = Date.now() - t0;
-    this.queue.push(ev);
+    this.enqueue(ev);
   }
 
   /** Serve the challenge for this request on demand — for a route the app wants to gate itself
@@ -345,7 +389,8 @@ export class Camada {
       const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
       if (!ip || this.challengePassed(req, ip)) return false;   // unidentifiable client: fail open
       (req as CamadaRequest).camadaChallenged = true;
-      this.serveChallengeInner(req as CamadaRequest, res, ip, req.url || '/');
+      const { path, query } = pathAndQuery(req as CamadaRequest);
+      this.serveChallengeInner(req as CamadaRequest, res, ip, path + query);
       return true;
     }, false);
   }
@@ -363,10 +408,12 @@ export class Camada {
     guarded(() => {
       if (this.disabled || !this.queue || !this.env) return;
       const ctx = (req as CamadaRequest).camada;
-      void (async () => {
+      const r = req as CamadaRequest;
+      const row = (async () => {
         const uid = data?.user ? await hashUserId(data.user, this.env!.ingestToken, (globalThis.crypto ?? webcrypto).subtle) : null;
-        this.queue!.push({ tap: TAP_NODE, et: event, uid, rid: ctx?.rid ?? null, sid: ctx?.sid ?? null, ip: ctx?.ip ?? null, ts: Date.now() });
+        this.enqueue({ tap: TAP_NODE, et: event, uid, rid: ctx?.rid ?? null, sid: ctx?.sid ?? null, ip: ctx?.ip ?? null, ts: Date.now() }, r);
       })().catch(logRateLimited);
+      if (r.camadaOpen) (r.camadaTracks ??= []).push(row);
     }, undefined);
   }
 
