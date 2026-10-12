@@ -228,7 +228,7 @@ export class Camada {
     // `header` condition is false.
     const v = this.snap.verdict({ ip, path, ua: req.headers['user-agent'], header: headerReader(req) });
     if (v.block) {
-      const headers: Record<string, string> = { 'x-block-reason': v.reason ?? '', 'x-block-version': v.version ?? '', 'content-type': 'text/plain' };
+      const headers: Record<string, string> = { 'x-block-reason': v.reason ?? '', 'x-block-version': v.version ?? '', 'content-type': 'text/plain', 'cache-control': 'no-store' };
       if (v.rule) headers['x-block-rule'] = v.rule;   // a custom rule blocked: name it, so the customer knows which row to edit
       res.writeHead(403, headers);
       res.end('Forbidden');

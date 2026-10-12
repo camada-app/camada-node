@@ -6,6 +6,7 @@ Needs `@camada/core` with `challengePageCsp` (next release after 0.5.1).
 
 ### Fixed
 
+- Block responses (path, ip, asn, country, tls and rule blocks, the `Forbidden` 403) now send `cache-control: no-store`, like the challenge answers, so a shared cache cannot serve one visitor's block to others. An upstream `cache-control` set on `res` is replaced. (camada-all-8lp6)
 - NestJS: every request was seen as `/`. Path rules and the path side of the challenge list did
   nothing, `/_cam/b.js`, `/_cam/fp` and `/__camada/challenge` fell through to Nest's 404, and every
   event shipped `p: "/"`. Express strips the mount path from `req.url` inside `app.use(path, …)`,

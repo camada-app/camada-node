@@ -40,6 +40,20 @@ describe('inline blocking', () => {
     expect(evs[0].tap).toBe('sdk-node');
   });
 
+  it('a block 403 is no-store and replaces an upstream public cache-control (camada-all-8lp6)', async () => {
+    const engine = engineWith(fakeAnalyst(), { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      res.setHeader('Cache-Control', 'public, max-age=600');   // an upstream middleware in front of camada
+      if (engine.handle(req, res)) return;
+      res.writeHead(200); res.end('ok');
+    });
+    open.push(app, engine);
+    const r = await fetch(`${app.url}/`, { headers: { 'x-forwarded-for': BLOCKED_IP } });
+    expect(r.status).toBe(403);
+    expect(r.headers.get('cache-control')).toBe('no-store');
+  });
+
   it('ignores a spoofed XFF without trusted-proxy config', async () => {
     const a = fakeAnalyst();
     const engine = engineWith(a);
