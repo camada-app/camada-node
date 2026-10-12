@@ -259,3 +259,55 @@ describe('serveChallenge()', () => {
     expect(events(a).at(-1)).toMatchObject({ st: 403, blk: 'challenge' });
   });
 });
+
+describe('content security policy (camada-all-mwpo)', () => {
+  const sha = (s: string) => `'sha256-${createHash('sha256').update(s, 'utf8').digest('base64')}'`;
+  const inline = (page: string, tag: string) => [...page.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'g'))].map((m) => m[1]);
+
+  /** helmet's default CSP (and a report-only one) set before camada, as helmet's docs advise. */
+  async function helmetApp() {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      res.setHeader('content-security-policy', "default-src 'self';script-src 'self';script-src-attr 'none'");
+      res.setHeader('content-security-policy-report-only', "script-src 'none'");
+      if (engine.handle(req, res)) return;
+      res.writeHead(200); res.end('app');
+    });
+    open.push(app, engine);
+    return app;
+  }
+
+  function expectOwnCsp(r: Response, page: string) {
+    const csp = r.headers.get('content-security-policy')!;
+    expect(csp).not.toContain("'self';script-src 'self'");   // the app's policy is gone, not merged
+    expect(r.headers.get('content-security-policy-report-only')).toBeNull();
+    const scripts = inline(page, 'script');
+    expect(scripts).toHaveLength(1);
+    const scriptSrc = /script-src ([^;]+)/.exec(csp)![1].trim();
+    expect(scriptSrc).toBe(sha(scripts[0]));                 // only the served solver, by hash
+    expect(csp).not.toContain('unsafe-inline');
+    for (const style of inline(page, 'style')) expect(csp).toContain(sha(style));
+    expect(csp).toContain("default-src 'none'");
+  }
+
+  it('the challenge page carries its own CSP: only its served solver runs', async () => {
+    const app = await helmetApp();
+    const r = await fetch(`${app.url}/cart`, { headers: { ...html, 'x-forwarded-for': CHALLENGED_IP } });
+    expect(r.status).toBe(403);
+    expectOwnCsp(r, await r.text());
+  });
+
+  it('the re-served page after a wrong solution does too, with the same policy', async () => {
+    const app = await helmetApp();
+    const first = await fetch(`${app.url}/cart`, { headers: { ...html, 'x-forwarded-for': CHALLENGED_IP } });
+    const page = await first.text();
+    const r = await verify(app, `nonce=${nonceOf(page)}&solution=nope&to=%2Fcart`);
+    expect(r.status).toBe(403);
+    const again = await r.text();
+    expectOwnCsp(r, again);
+    expect(r.headers.get('content-security-policy')).toBe(first.headers.get('content-security-policy'));
+  });
+});

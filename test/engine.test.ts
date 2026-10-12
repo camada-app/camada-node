@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { connect } from 'node:net';
 import { version } from '../package.json';
 import type { Camada } from '../src/index.js';
@@ -406,5 +406,51 @@ describe('WebSocket upgrades (attach)', () => {
     const emit = app.server.emit;
     expect(off.attach(app.server)).toBe(app.server);
     expect(app.server.emit).toBe(emit);
+  });
+});
+
+describe('serverless (CAMADA_SERVERLESS=1)', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  // A frozen function never runs the 15 s interval: the request's rows must be on their way as
+  // the response finishes. setInterval is faked and never advanced, so only a per-request flush ships.
+  async function oneRequest(env: Record<string, string>, opts: Parameters<typeof engineWith>[2] = {}) {
+    const a = fakeAnalyst();
+    const engine = engineWith(a, env, opts);
+    await loaded(engine);
+    vi.useFakeTimers({ toFake: ['setInterval'] });
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      engine.track(req, 'login_failed', { user: 'a@b.c' });
+      res.writeHead(200); res.end('ok');
+    });
+    open.push(app, engine);
+    const r = await fetch(`${app.url}/login`);
+    await r.text();
+    await settle(50);
+    return { a, engine, r };
+  }
+
+  it('ships the request event and its track() row without waiting for the flush interval', async () => {
+    const { a, engine } = await oneRequest({ CAMADA_SERVERLESS: '1' });
+    const evs = a.events.flat() as Array<Record<string, unknown>>;
+    expect(evs).toContainEqual(expect.objectContaining({ p: '/login', st: 200 }));
+    expect(evs).toContainEqual(expect.objectContaining({ et: 'login_failed' }));
+    expect(a.events).toHaveLength(1);   // one POST per request: the finish flush waited for the track() row
+    expect(engine.queue!.size).toBe(0);
+  });
+
+  it('hands every flush to the waitUntil option', async () => {
+    const held: Promise<unknown>[] = [];
+    const { a } = await oneRequest({ CAMADA_SERVERLESS: '1' }, { waitUntil: (p) => { held.push(p); } });
+    expect(held.length).toBeGreaterThan(0);
+    await Promise.all(held);
+    expect((a.events.flat() as Array<Record<string, unknown>>).some((e) => e.et === 'login_failed')).toBe(true);
+  });
+
+  it('keeps batching in timer mode', async () => {
+    const { a, engine } = await oneRequest({});
+    expect(a.events).toHaveLength(0);
+    expect(engine.queue!.size).toBe(2);
   });
 });

@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+Needs `@camada/core` with `challengePageCsp` (next release after 0.5.1).
+
+### Fixed
+
+- NestJS: every request was seen as `/`. Path rules and the path side of the challenge list did
+  nothing, `/_cam/b.js`, `/_cam/fp` and `/__camada/challenge` fell through to Nest's 404, and every
+  event shipped `p: "/"`. Express strips the mount path from `req.url` inside `app.use(path, …)`,
+  which is how Nest mounts module middleware. camada now reads `req.originalUrl` first, which
+  also fixes prefix mounts in plain Express (camada-all-6ogs).
+- The challenge verify POST and the beacon POST hung until the server timeout when a body parser
+  ran before camada (always on Nest). camada now uses the parser's `req.body`, and answers at once
+  when the body was read and nothing usable is left (camada-all-r3s6).
+- `CAMADA_SERVERLESS=1` flushes each request's event and every `track()` row as they are queued,
+  instead of waiting for the 15 s timer a frozen function never runs (camada-all-fcc3).
+- The challenge page works under the app's CSP (helmet before camada). It sends its own
+  `Content-Security-Policy` that allows only its inline script and style by hash, and drops any
+  inherited `Content-Security-Policy` / `Content-Security-Policy-Report-Only` (camada-all-mwpo).
+
+### Added
+
+- `createCamada({ waitUntil })`: with `CAMADA_SERVERLESS=1`, every per-request flush and lazy
+  snapshot refresh is handed to it so the platform keeps the invocation alive (camada-all-fcc3).
+
 ## 0.3.1 (2026-10-09; follows 0.3.0)
 
 Needs `@camada/core` 0.5.1.
