@@ -45,6 +45,7 @@ interface CamadaRequest extends IncomingMessage {
   camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
   camadaOpen?: boolean;          // its event ships on response finish: a track() row until then rides that flush
   camadaTracks?: Promise<void>[];   // track() rows still hashing (serverless: the finish flush waits for them)
+  camadaPrefix?: string;         // the mount prefix seen when camada ran (scriptTag() runs later, where req.url is whole again)
 }
 
 /** The getter `header` conditions read (§D3). node:http lower-cases every incoming name and
@@ -74,6 +75,25 @@ function pathAndQuery(req: CamadaRequest): { path: string; query: string } {
  *  `req.url` is stripped to '/') still serves `/_cam/b.js`. */
 const atEndpoint = (req: CamadaRequest, path: string, endpoint: string): boolean =>
   path === endpoint || splitUrl(req.url || '/').path === endpoint;
+
+/** The mount prefix camada runs under: the full path minus the mount-relative one, when the full
+ *  path ends with it (`app.use('/api', …)`, koa-mount). A relative path of `/` says nothing: it is
+ *  both the mount's own root and what a wildcard mount (Nest) strips every path to, so no prefix. */
+function mountPrefix(req: CamadaRequest): string {
+  if (!req.originalUrl) return '';
+  const full = splitUrl(req.originalUrl).path, rel = splitUrl(req.url || '/').path;
+  return rel !== '/' && full !== rel && full.endsWith(rel) ? full.slice(0, full.length - rel.length) : '';
+}
+
+/** A unix-socket (pipe) listener: Node never has a peer address there, on any request. The
+ *  listening server reports its address as the socket path (a string); `_pipeName` keeps the
+ *  answer after server.close() has dropped the handle while connections drain. */
+function onUnixListener(socket: unknown): boolean {
+  const srv = (socket as { server?: { address?: () => unknown; _pipeName?: unknown } } | null)?.server;
+  if (!srv) return false;
+  try { if (typeof srv.address?.() === 'string') return true; } catch { /* not a net.Server */ }
+  return typeof srv._pipeName === 'string';
+}
 
 const cookieValue = (cookie: string, name: string): string | null => {
   const src = '; ' + cookie;
@@ -108,6 +128,8 @@ export class Camada {
   private readonly fpPath: string;
   private readonly challengeOn: boolean;
   private readonly challengePath: string;
+  private readonly challengePathSet: boolean;   // configured explicitly: used as given, never prefixed
+  private readonly scriptPathSet: boolean;
   private readonly kit: ChallengeKit | null = null;
   private readonly envSource: Record<string, string | undefined>;
   private readonly waitUntil?: (p: Promise<unknown>) => void;
@@ -120,6 +142,8 @@ export class Camada {
     this.fpPath = opts.fpPath ?? FP_PATH;
     this.challengeOn = opts.challenge !== false && this.envSource.CAMADA_CHALLENGE !== '0';
     this.challengePath = opts.challengePath ?? CHALLENGE_PATH;
+    this.challengePathSet = opts.challengePath != null;
+    this.scriptPathSet = opts.scriptPath != null;
     this.env = resolveEnv(this.envSource);
     if (!this.env) return;                       // unconfigured: every entry point no-ops
     if (this.envSource.CAMADA_DISABLED === '1') return;   // killed at boot: no poll timer, no exit hooks, truly silent
@@ -140,15 +164,22 @@ export class Camada {
     return this.env?.trustedProxy ?? this.snap?.config?.trusted_proxy ?? null;   // explicit local override wins
   }
 
-  /** The client IP per the trusted-proxy config. A request with a socket but no readable peer
-   *  (the client reset the connection before camada ran, e.g. behind an async middleware) is
-   *  unidentifiable: core's no-peer X-Forwarded-For walk is for adapters with no socket at all,
-   *  and here it would believe whatever the client wrote. So: null, the stance every ip-bound
-   *  feature already takes (no ip rules, no challenge). */
+  /** The client IP per the trusted-proxy config (team contract C6 v3). No socket at all, or a
+   *  unix-socket listener (nginx/Passenger in front, where Node never has a peer): core's no-peer
+   *  X-Forwarded-For walk, which trusts the local proxy. A TCP socket with no readable peer (the
+   *  client reset the connection before camada ran, e.g. behind an async middleware) is
+   *  unidentifiable: the walk would believe whatever the client wrote. So: null, the stance every
+   *  ip-bound feature already takes (no ip rules, no challenge). */
   private clientIp(req: IncomingMessage): string | null {
     const peer = req.socket?.remoteAddress;
-    if (!peer && req.socket) return null;
-    return resolveClientIp(peer, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+    if (!peer && req.socket && !onUnixListener(req.socket)) return null;
+    return resolveClientIp(peer ?? null, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+  }
+
+  /** Where the challenge form posts: under the mount prefix, so it reaches camada, unless the
+   *  path was configured explicitly. */
+  private challengeAction(req: CamadaRequest): string {
+    return this.challengePathSet ? this.challengePath : (req.camadaPrefix ?? mountPrefix(req)) + this.challengePath;
   }
 
   private beaconEnabled(): boolean { return this.snap?.config?.beacon !== false; }
@@ -190,6 +221,7 @@ export class Camada {
 
     const { path, query } = pathAndQuery(req);
     const ip = this.clientIp(req);
+    req.camadaPrefix = mountPrefix(req);
 
     // enforce before anything else, beacon endpoints included — fail open while cold. The custom
     // rules read the user agent and the request headers (§D3); without them every `ua` and
@@ -324,7 +356,7 @@ export class Camada {
   private serveChallengeInner(req: CamadaRequest, res: ServerResponse, ip: string, target: string): void {
     const to = safeReturnTo(target);
     if (wantsHtml((req.headers.accept as string) ?? null, (req.headers['sec-fetch-dest'] as string) ?? null)) {
-      writeChallengePage(res, { nonce: this.kit!.nonce(ip, Date.now()), action: this.challengePath, to });
+      writeChallengePage(res, { nonce: this.kit!.nonce(ip, Date.now()), action: this.challengeAction(req), to });
     } else {
       writeChallengeJson(res);
     }
@@ -352,7 +384,7 @@ export class Camada {
       const to = safeReturnTo(form.to);
       const now = Date.now();
       if (!this.kit!.verify(ip, now, form.nonce, form.solution)) {
-        writeChallengePage(res, { nonce: this.kit!.nonce(ip, now), action: this.challengePath, to });
+        writeChallengePage(res, { nonce: this.kit!.nonce(ip, now), action: this.challengeAction(req), to });
         return;
       }
       res.writeHead(302, {
@@ -361,7 +393,7 @@ export class Camada {
         'cache-control': 'no-store',
       });
       res.end();
-      const ev = this.buildEvent(req, this.challengePath, '', ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
+      const ev = this.buildEvent(req, this.challengeAction(req), '', ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
       ev.st = 200;
       ev.ch = 1;   // challenge passed (contract §A3 ingest field)
       this.enqueue(ev);
@@ -428,7 +460,9 @@ export class Camada {
   scriptTag(req: IncomingMessage): string {
     if (this.disabled || !this.beaconEnabled()) return '';
     const rid = (req as CamadaRequest).camada?.rid;
-    return `<script src="${this.scriptPath}${rid ? `?r=${rid}` : ''}" async></script>`;
+    const r = req as CamadaRequest;
+    const src = this.scriptPathSet ? this.scriptPath : (r.camadaPrefix ?? mountPrefix(r)) + this.scriptPath;
+    return `<script src="${src}${rid ? `?r=${rid}` : ''}" async></script>`;
   }
 
   /** App-context outcome events (login failed, signup, …). The identifier is HMAC-hashed
