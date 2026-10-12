@@ -23,8 +23,12 @@ CAMADA_INGEST_URL=http://localhost:8787        # dev only; defaults to productio
 **Express / Connect**
 ```js
 import camada from '@camada/node';
-app.use(camada.express());
+app.use(camada.express());   // before express.json() / urlencoded() and before helmet
 ```
+Mount camada first. It still works behind body parsers (it uses the `req.body` they leave for
+its challenge and beacon POSTs) and behind helmet (the challenge page replaces any inherited
+`Content-Security-Policy` with its own), but first is cheapest: a blocked request never pays for
+parsing. Under a prefix (`app.use('/api', camada.express())`) rules and events see the full path.
 
 **Fastify**
 ```js
@@ -37,6 +41,9 @@ await app.register(camadaFastify);
 import { CamadaModule } from '@camada/node/nest';
 @Module({ imports: [CamadaModule.forRoot()] })   // Nest ≤10: CamadaModule.forRoot({ routes: '*' })
 ```
+Nest registers its body parsers before module middleware; camada reads what they parsed, so the
+default `bodyParser: true` is fine. Tested on Nest 11. Nest 10 (`routes: '*'`) is checked through
+the Express 4 wildcard mount it registers, not against Nest 10 itself.
 
 **Koa**
 ```js
@@ -145,7 +152,17 @@ handshake your library then rejects still ships `st: 101`.
 
 - `CAMADA_DISABLED=1` — kill switch, checked per request.
 - `CAMADA_SERVERLESS=1` — lazy snapshot refresh (no interval timer); cold invocations fail
-  open and catch up asynchronously.
+  open and catch up asynchronously. Each request's event (and every `track()` row) is POSTed as
+  the response finishes instead of waiting for the 15 s batch timer, which a frozen function
+  never runs. Pass the platform's `waitUntil` so the invocation stays alive for that POST:
+  ```js
+  import { waitUntil } from '@vercel/functions';
+  const camada = createCamada({ waitUntil });   // also holds the lazy snapshot refresh open
+  ```
+  Where the platform has no `waitUntil`, the POST starts before the response completes but can
+  still be frozen mid-flight; use a fetch adapter (`@camada/hono`, `@camada/next`) there.
+- The challenge page sends its own `Content-Security-Policy` allowing only its inline script and
+  style by `sha256` hash, and drops any `Content-Security-Policy(-Report-Only)` set before it.
 - Enforcement scope at this position: IP, path, user-agent and request-header conditions. ASN,
   country and TLS-fingerprint conditions can't be evaluated in-app and fail open (a rule that
   needs one never matches here; run `@camada/hono` on Cloudflare Workers for those).
