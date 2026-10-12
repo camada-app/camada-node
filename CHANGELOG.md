@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased
+
+Needs `@camada/core` with `challengePageCsp` (next release after 0.5.1).
+
+### Fixed
+
+- NestJS: every request was seen as `/`. Path rules and the path side of the challenge list did
+  nothing, `/_cam/b.js`, `/_cam/fp` and `/__camada/challenge` fell through to Nest's 404, and every
+  event shipped `p: "/"`. Express strips the mount path from `req.url` inside `app.use(path, …)`,
+  which is how Nest mounts module middleware. camada now reads `req.originalUrl` first, which
+  also fixes prefix mounts in plain Express (camada-all-6ogs).
+- The challenge verify POST and the beacon POST hung until the server timeout when a body parser
+  ran before camada (always on Nest). camada now uses the parser's `req.body`, and answers at once
+  when the body was read and nothing usable is left (camada-all-r3s6).
+- `CAMADA_SERVERLESS=1` flushes each request's event and every `track()` row as they are queued,
+  instead of waiting for the 15 s timer a frozen function never runs (camada-all-fcc3).
+- The challenge page works under the app's CSP (helmet before camada). It sends its own
+  `Content-Security-Policy` that allows only its inline script and style by hash, and drops any
+  inherited `Content-Security-Policy` / `Content-Security-Policy-Report-Only` (camada-all-mwpo).
+
+- A client that reset its connection before camada ran (behind an async middleware) left no
+  readable peer address, and the trusted-proxy walk then believed its `X-Forwarded-For`, so a
+  spoofed address could evade a block or frame someone else. When the request has a socket but
+  no peer, camada now resolves no IP, which is the same as any unidentifiable client: no ip rules
+  and no challenge (camada-all-yfc6).
+- On a unix-socket listener (nginx or Passenger in front of Node) every request has no peer
+  address, and the fix above gave every one of them no IP, even with a trusted proxy configured.
+  A unix-socket listener now runs the trusted-proxy walk without a peer, trusting the local proxy;
+  only a TCP request whose peer is gone resolves no IP (camada-all-yfc6).
+- Under a prefix mount (`app.use('/api', …)`, koa-mount) the challenge form posted to
+  `/__camada/challenge` at the root, which never reached camada, so no browser could pass the
+  challenge; `scriptTag()` pointed at the root too. Both now point under the mount prefix, unless
+  `challengePath` / `scriptPath` were set explicitly (camada-all-6ogs).
+- `CAMADA_SERVERLESS=1`: a `track()` row queued before `serveChallenge()` answered the request is
+  flushed when the response finishes, instead of waiting in the queue (camada-all-fcc3).
+- Koa: behind `@koa/bodyparser` / `koa-bodyparser`, challenge verification failed every time
+  and beacons were dropped. The adapter now hands `ctx.request.body` to the engine
+  (camada-all-r3s6).
+- The challenge page's CSP is computed for the page's own `bits`.
+- The challenge page's CSP no longer sets `form-action`. Browsers also apply it to the redirects
+  after the verify POST, so an app that sent the browser on to an external sign-in was blocked
+  (through `@camada/core`, camada-all-mwpo).
+
+### Changed
+
+- camada's own endpoints (`/_cam/b.js`, `/_cam/fp`, `/__camada/challenge`) answer at the
+  mount-relative path as well as the full path. `app.use('/api', camada.express())` serves them
+  under `/api` again, as it did before the `originalUrl` change above, while rules and events keep
+  the full path (camada-all-6ogs).
+- Koa under `koa-mount`: rules and events now see the full path (`/api/…`), not the
+  mount-stripped one. The adapter copies Koa's `ctx.originalUrl` to the request (camada-all-6ogs).
+
+### Added
+
+- `createCamada({ waitUntil })`: with `CAMADA_SERVERLESS=1`, every per-request flush and lazy
+  snapshot refresh is handed to it so the platform keeps the invocation alive (camada-all-fcc3).
+
 ## 0.3.1 (2026-10-09; follows 0.3.0)
 
 Needs `@camada/core` 0.5.1.

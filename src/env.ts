@@ -2,7 +2,7 @@
 //   CAMADA_KEY=<ingest_token>.<snap_token>   (printed by `reconcile instructions` and seed)
 //   CAMADA_INGEST_URL / CAMADA_SNAPSHOT_URL  (dev: http://localhost:8787[/snapshot])
 //   CAMADA_DISABLED=1                        kill switch, checked per request
-//   CAMADA_SERVERLESS=1                      lazy snapshot mode (no interval timer)
+//   CAMADA_SERVERLESS=1                      lazy snapshot mode (no interval timer), flush per request
 //   CAMADA_TRUSTED_PROXY                     local override: none | vercel | hops:N | cidrs:a,b
 import { parseKey, parseTrustedProxyEnv, type TrustedProxyConfig } from '@camada/core';
 
