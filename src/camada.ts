@@ -487,9 +487,11 @@ export class Camada {
     };
   }
 
-  stop(): void {
+  /** Stops polling and the event queue. The promise settles once rows still queued behind a drain
+   *  in flight or a 429 hold are sent (or counted dropped); it never rejects. */
+  stop(): Promise<void> {
     this.snap?.stop();
-    this.queue?.stop();
+    return this.queue?.stop() ?? Promise.resolve();
   }
 }
 

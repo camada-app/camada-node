@@ -46,6 +46,9 @@ Needs `@camada/core` with `challengePageCsp` (next release after 0.5.1).
 
 ### Changed
 
+- `Camada.stop()` returns `Promise<void>` (was `void`): it settles once rows still queued behind a
+  drain in flight or an ingest 429 hold are sent or counted dropped, so a graceful shutdown can
+  `await camada.stop()` before exiting. Calling it without `await` works as before. (camada-all-a4m9)
 - camada's own endpoints (`/_cam/b.js`, `/_cam/fp`, `/__camada/challenge`) answer at the
   mount-relative path as well as the full path. `app.use('/api', camada.express())` serves them
   under `/api` again, as it did before the `originalUrl` change above, while rules and events keep
