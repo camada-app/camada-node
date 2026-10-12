@@ -311,3 +311,19 @@ describe('content security policy (camada-all-mwpo)', () => {
     expect(r.headers.get('content-security-policy')).toBe(first.headers.get('content-security-policy'));
   });
 });
+
+describe('writeChallengePage (R1-17)', () => {
+  it('sends the CSP for the bits of the page it writes', async () => {
+    const { writeChallengePage } = await import('../src/challenge.js');
+    const { challengePageCsp } = await import('@camada/core');
+    const sha = (t: string) => `'sha256-${createHash('sha256').update(t, 'utf8').digest('base64')}'`;
+    for (const bits of [8, 16, 20]) {
+      const app = await serve((_req, res) => writeChallengePage(res, { nonce: 'ab'.repeat(16), action: '/__camada/challenge', to: '/', bits }));
+      open.push(app);
+      const r = await fetch(app.url);
+      const script = /<script>([\s\S]*?)<\/script>/.exec(await r.text())![1];
+      expect(r.headers.get('content-security-policy')).toBe(challengePageCsp(bits));
+      expect(r.headers.get('content-security-policy')).toContain(`script-src ${sha(script)};`);
+    }
+  });
+});

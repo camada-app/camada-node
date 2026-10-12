@@ -48,15 +48,18 @@
     "@camada/core": "file:../camada-core"
   },
   "devDependencies": {
+    "@koa/bodyparser": "^6.1.0",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
     "@types/express": "^4.17.25",
     "@types/koa": "^2.15.2",
+    "@types/koa-mount": "^4.0.5",
     "@types/node": "^22.10.0",
     "express": "^4.21.0",
     "fastify": "^5.2.0",
     "koa": "^2.15.0",
+    "koa-mount": "^4.2.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "tsup": "^8.3.5",
