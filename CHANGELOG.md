@@ -51,6 +51,7 @@ Needs `@camada/core` with `challengePageCsp` (next release after 0.5.1).
   the full path (camada-all-6ogs).
 - Koa under `koa-mount`: rules and events now see the full path (`/api/…`), not the
   mount-stripped one. The adapter copies Koa's `ctx.originalUrl` to the request (camada-all-6ogs).
+- The `exports` map now gives `require` its own `.d.cts` declarations (`import` and `require` each carry a `types` condition), so a CommonJS TypeScript app on `moduleResolution: node16` compiles; CI runs `@arethetypeswrong/cli`. (camada-all-vuzm)
 
 ### Added
 
