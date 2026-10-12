@@ -4,6 +4,10 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import type { Server } from 'node:http';
 import { connect } from 'node:net';
+import { get as httpGet } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CHALLENGE_COOKIE } from '@camada/core';
 import { fakeAnalyst, engineWith, loaded, settle, BLOCKED_IP, CHALLENGED_IP, type FakeAnalyst } from './harness.js';
 import { camadaFastify } from '../src/fastify.js';
@@ -103,6 +107,7 @@ const nonceOf = (page: string) => /name="nonce" value="([0-9a-f]{32})"/.exec(pag
 const solve = (nonce: string): string => {
   for (let n = 0; ; n++) if (createHash('sha256').update(`${nonce}.${n}`).digest('hex').startsWith('0000')) return String(n);
 };
+const actionOf = (page: string) => /<form id="camada-f" method="POST" action="([^"]*)"/.exec(page)![1];
 const rows = async (a: FakeAnalyst, engine: { queue: { flush(): Promise<void> } | null }) => {
   await settle();
   await engine.queue!.flush();
@@ -142,8 +147,11 @@ async function expectBodyEndpoints(base: string, a: FakeAnalyst, engine: { queue
   const xff = { 'x-forwarded-for': CHALLENGED_IP };
   const page = await fetch(`${base}${prefix}/cart`, { headers: { ...html, ...xff } });
   expect(page.status).toBe(403);
-  const nonce = nonceOf(await page.text());
-  const post = (body: string) => fetch(`${base}${prefix}/__camada/challenge`, {
+  const body = await page.text();
+  const nonce = nonceOf(body);
+  const action = actionOf(body);
+  expect(action).toBe(`${prefix}/__camada/challenge`);   // R2-4: the form posts where camada answers
+  const post = (body: string) => fetch(`${base}${action}`, {
     method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(2000),
     headers: { ...xff, 'content-type': 'application/x-www-form-urlencoded' }, body,
   });
@@ -162,6 +170,16 @@ async function expectBodyEndpoints(base: string, a: FakeAnalyst, engine: { queue
   });
   expect(fp.status).toBe(204);
   expect(await rows(a, engine)).toContainEqual(expect.objectContaining({ sig: 1, rid: 'abc', tz: 'UTC', ip: '9.9.9.9' }));
+}
+
+/** The beacon tag rendered by the app points under the mount, and that URL serves the script (R2-4). */
+async function expectScriptTag(base: string, prefix: string) {
+  const tag = await (await fetch(`${base}${prefix}/page`, { headers: { 'x-tag': '1' } })).text();
+  const src = /<script src="([^"?]*)/.exec(tag)![1];
+  expect(src).toBe(`${prefix}/_cam/b.js`);
+  const js = await fetch(`${base}${src}`);
+  expect(js.status).toBe(200);
+  expect(js.headers.get('content-type')).toContain('javascript');
 }
 
 /** camada's own endpoints answer under a prefix mount at `${prefix}/…` (R1-19). */
@@ -207,7 +225,7 @@ describe('express mounts', () => {
     const { default: express } = await import('express');
     const app = express();
     mount(app, engine.express());
-    app.use((_req, res) => { res.send('app'); });
+    app.use((req, res) => { res.send(req.headers['x-tag'] ? engine.scriptTag(req) : 'app'); });
     const server = await listen(app);
     closers.push(() => new Promise((r) => server.close(r)));
     return `http://127.0.0.1:${portOf(server)}`;
@@ -223,6 +241,20 @@ describe('express mounts', () => {
     const base = await expressApp((app, mw) => app.use('/api', mw), engine);
     await expectOwnEndpoints(base, '/api');
     await expectBodyEndpoints(base, a, engine, '/api');
+    await expectScriptTag(base, '/api');
+  });
+
+  it('explicit scriptPath / challengePath are used as configured under a prefix mount (R2-4)', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' }, { scriptPath: '/api/x/b.js', challengePath: '/api/x/ch' });
+    closers.push(() => engine.stop());
+    await loaded(engine);
+    const base = await expressApp((app, mw) => app.use('/api', mw), engine);
+    const page = await fetch(`${base}/api/cart`, { headers: { ...html, 'x-forwarded-for': CHALLENGED_IP } });
+    expect(actionOf(await page.text())).toBe('/api/x/ch');
+    const tag = await (await fetch(`${base}/api/page`, { headers: { 'x-tag': '1' } })).text();
+    expect(tag).toContain('src="/api/x/b.js?r=');
   });
 
   it("a wildcard mount (what Nest <= 10 registers for routes: '*') still sees the real path", async () => {
@@ -340,12 +372,40 @@ describe('client ip with the peer already gone', () => {
   });
 });
 
+// R2-3: behind nginx/Passenger the app often listens on a unix socket, where Node never has a peer
+// address. That is not the reset case above: the only hop is the local proxy, so the
+// trusted-proxy walk runs without a peer (team contract C6 v3).
+describe('client ip on a unix-socket listener', () => {
+  it('resolves X-Forwarded-For per the trusted-proxy config', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'cidrs:173.245.48.0/20' });
+    closers.push(() => engine.stop());
+    await loaded(engine);
+    const { default: express } = await import('express');
+    const app = express();
+    app.use(engine.express());
+    app.use((_req, res) => { res.send('app'); });
+    const dir = mkdtempSync(join(tmpdir(), 'cmd-'));
+    const sock = join(dir, 's.sock');
+    const server = await new Promise<Server>((r) => { const s = app.listen(sock, () => r(s)); });
+    closers.push(() => new Promise((r) => server.close(() => { rmSync(dir, { recursive: true, force: true }); r(undefined); })));
+    const get = (xff: string) => new Promise<number>((resolve, reject) => {
+      httpGet({ socketPath: sock, path: '/u', headers: { 'x-forwarded-for': xff } }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode!)); }).on('error', reject);
+    });
+    expect(typeof server.address()).toBe('string');
+    expect(await get(`${BLOCKED_IP}, 173.245.48.1`)).toBe(403);   // the walk ran: the client behind the CF hop is blocked
+    a.events.length = 0;
+    expect(await get('1.2.3.4, 173.245.48.1')).toBe(200);
+    expect(await rows(a, engine)).toContainEqual(expect.objectContaining({ p: '/u', ip: '1.2.3.4', st: 200 }));
+  });
+});
+
 describe('koa: body parser first, mounts (R1-14, R1-19)', () => {
-  async function koaApp(build: (app: import('koa')) => void) {
+  async function koaApp(build: (app: import('koa')) => void, engine: ReturnType<typeof engineWith>) {
     const { default: Koa } = await import('koa');
     const app = new Koa();
     build(app);
-    app.use(async (ctx) => { ctx.body = 'app'; });
+    app.use(async (ctx) => { ctx.body = ctx.get('x-tag') ? engine.scriptTag(ctx.req) : 'app'; });
     const server = await listen(app as never);
     closers.push(() => new Promise((r) => server.close(r)));
     return `http://127.0.0.1:${portOf(server)}`;
@@ -354,15 +414,16 @@ describe('koa: body parser first, mounts (R1-14, R1-19)', () => {
   it('@koa/bodyparser before camada: verify passes (302 + _cch) and the beacon ships', async () => {
     const { a, engine } = await ready(true);
     const { bodyParser } = await import('@koa/bodyparser');
-    await expectBodyEndpoints(await koaApp((app) => { app.use(bodyParser()); app.use(camadaKoa(engine)); }), a, engine);
+    await expectBodyEndpoints(await koaApp((app) => { app.use(bodyParser()); app.use(camadaKoa(engine)); }, engine), a, engine);
   });
 
   it('koa-mount: own endpoints answer under the prefix, events and path rules see the full path', async () => {
     const { a, engine } = await ready(true);
     const { default: mount } = await import('koa-mount');
-    const base = await koaApp((app) => { app.use(mount('/api', camadaKoa(engine) as never)); });
+    const base = await koaApp((app) => { app.use(mount('/api', camadaKoa(engine) as never)); }, engine);
     await expectOwnEndpoints(base, '/api');
     await expectRealPaths(base, a, engine, '/api');
     await expectBodyEndpoints(base, a, engine, '/api');
+    await expectScriptTag(base, '/api');
   });
 });

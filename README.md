@@ -30,9 +30,9 @@ its challenge and beacon POSTs) and behind helmet (the challenge page replaces a
 `Content-Security-Policy` with its own), but first is cheapest: a blocked request never pays for
 parsing. Under a prefix (`app.use('/api', camada.express())`) rules and events see the full path
 (`/api/…`), and camada's own endpoints answer under the prefix (`/api/_cam/b.js`, `/api/_cam/fp`,
-`/api/__camada/challenge`). The beacon tag and the challenge form still point at the root paths,
-so either mount camada at the root or set `scriptPath` and `challengePath` to the prefixed paths.
-The beacon posts next to its script, so `fpPath` can stay as it is.
+`/api/__camada/challenge`). The beacon tag (`scriptTag()`) and the challenge form point under the
+prefix too, unless you set `scriptPath` or `challengePath` yourself: an explicit path is used
+exactly as given. The beacon posts next to its script, so `fpPath` can stay as it is.
 
 **Fastify**
 ```js
@@ -64,6 +64,9 @@ full path, and its own endpoints answer under the prefix.
    poll and event batch carries `x-camada-sdk: @camada/node/<version>`.
 2. Resolves the client IP per your tenant's trusted-proxy config — raw `X-Forwarded-For` is
    never trusted without it (`CAMADA_TRUSTED_PROXY=hops:1|cidrs:…|vercel` overrides locally).
+   On a unix-socket listener (nginx or Passenger in front) Node has no peer address, so the walk
+   runs without one and trusts the local proxy that owns the socket. A TCP request whose peer is
+   already gone (the client reset the connection) gets no IP: no ip rules, no challenge.
 3. Runs your ordered custom rules (see below), then the allow, block and challenge lists.
    Blocked → `403` with `x-block-reason` before your app; the event still ships, with
    `st: 403` and `blk: <reason>` (ip4|ip6|path|rule) so the analyst counts SDK blocks apart

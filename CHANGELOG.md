@@ -25,6 +25,14 @@ Needs `@camada/core` with `challengePageCsp` (next release after 0.5.1).
   spoofed address could evade a block or frame someone else. When the request has a socket but
   no peer, camada now resolves no IP, which is the same as any unidentifiable client: no ip rules
   and no challenge (camada-all-yfc6).
+- On a unix-socket listener (nginx or Passenger in front of Node) every request has no peer
+  address, and the fix above gave every one of them no IP, even with a trusted proxy configured.
+  A unix-socket listener now runs the trusted-proxy walk without a peer, trusting the local proxy;
+  only a TCP request whose peer is gone resolves no IP (camada-all-yfc6).
+- Under a prefix mount (`app.use('/api', …)`, koa-mount) the challenge form posted to
+  `/__camada/challenge` at the root, which never reached camada, so no browser could pass the
+  challenge; `scriptTag()` pointed at the root too. Both now point under the mount prefix, unless
+  `challengePath` / `scriptPath` were set explicitly (camada-all-6ogs).
 - `CAMADA_SERVERLESS=1`: a `track()` row queued before `serveChallenge()` answered the request is
   flushed when the response finishes, instead of waiting in the queue (camada-all-fcc3).
 - Koa: behind `@koa/bodyparser` / `koa-bodyparser`, challenge verification failed every time
