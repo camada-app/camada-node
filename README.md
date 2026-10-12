@@ -28,7 +28,11 @@ app.use(camada.express());   // before express.json() / urlencoded() and before 
 Mount camada first. It still works behind body parsers (it uses the `req.body` they leave for
 its challenge and beacon POSTs) and behind helmet (the challenge page replaces any inherited
 `Content-Security-Policy` with its own), but first is cheapest: a blocked request never pays for
-parsing. Under a prefix (`app.use('/api', camada.express())`) rules and events see the full path.
+parsing. Under a prefix (`app.use('/api', camada.express())`) rules and events see the full path
+(`/api/…`), and camada's own endpoints answer under the prefix (`/api/_cam/b.js`, `/api/_cam/fp`,
+`/api/__camada/challenge`). The beacon tag and the challenge form still point at the root paths,
+so either mount camada at the root or set `scriptPath` and `challengePath` to the prefixed paths.
+The beacon posts next to its script, so `fpPath` can stay as it is.
 
 **Fastify**
 ```js
@@ -48,8 +52,11 @@ the Express 4 wildcard mount it registers, not against Nest 10 itself.
 **Koa**
 ```js
 import { camadaKoa } from '@camada/node/koa';
-app.use(camadaKoa());
+app.use(camadaKoa());   // before @koa/bodyparser
 ```
+Register it first. Behind `@koa/bodyparser` or `koa-bodyparser` it reads the form and beacon from
+`ctx.request.body`. Under `koa-mount` it works like an Express prefix mount: rules and events see the
+full path, and its own endpoints answer under the prefix.
 
 ## What it does per request
 

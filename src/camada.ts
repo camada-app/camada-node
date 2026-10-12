@@ -7,13 +7,13 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId explicitly, so the hash never depends on which global the host exposes
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, hashUserId, guarded, logRateLimited,
-  challengePage, challengeCookie, safeReturnTo, wantsHtml, CHALLENGE_COOKIE,
+  challengeCookie, safeReturnTo, wantsHtml, CHALLENGE_COOKIE,
   TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import iife from '@camada/browser/iife-string';
 import { resolveEnv, type ResolvedEnv } from './env.js';
 import {
-  CHALLENGE_PATH, nodeChallengeKit, readForm, isHttps, writeChallengePage, writeChallengeJson,
+  CHALLENGE_PATH, nodeChallengeKit, readForm, parsedBody, isHttps, writeChallengePage, writeChallengeJson,
 } from './challenge.js';
 import { SDK_ID } from './version.js';
 
@@ -55,14 +55,25 @@ const headerReader = (req: IncomingMessage) => (name: string): string | null => 
   return v == null ? null : Array.isArray(v) ? v.join(', ') : v;
 };
 
-/** Path and query as the client sent them. Express strips the mount path from `req.url` inside
- *  `app.use(path, mw)` (Nest mounts module middleware that way, at '{*splat}' or '*'), so read
- *  `originalUrl` first; plain node:http, Koa and Fastify's raw request only have `url`. */
-function pathAndQuery(req: CamadaRequest): { path: string; query: string } {
-  const raw = req.originalUrl || req.url || '/';
+const splitUrl = (raw: string): { path: string; query: string } => {
   const qi = raw.indexOf('?');
   return qi === -1 ? { path: raw, query: '' } : { path: raw.slice(0, qi), query: raw.slice(qi) };
+};
+
+/** Path and query as the client sent them: what rules, the challenge list and events see. Express
+ *  strips the mount path from `req.url` inside `app.use(path, mw)` (Nest mounts module middleware
+ *  that way, at '{*splat}' or '*'), and koa-mount does the same (the Koa adapter copies Koa's
+ *  `originalUrl` over), so read `originalUrl` first; plain node:http and Fastify only have `url`. */
+function pathAndQuery(req: CamadaRequest): { path: string; query: string } {
+  return splitUrl(req.originalUrl || req.url || '/');
 }
+
+/** Whether the request is for one of camada's own endpoints (beacon script, beacon POST,
+ *  challenge verify). Those answer at the mount-relative path (`req.url`), so `app.use('/api',
+ *  camada)` serves `/api/_cam/b.js`, and at the full path, so a wildcard mount (Nest, whose
+ *  `req.url` is stripped to '/') still serves `/_cam/b.js`. */
+const atEndpoint = (req: CamadaRequest, path: string, endpoint: string): boolean =>
+  path === endpoint || splitUrl(req.url || '/').path === endpoint;
 
 const cookieValue = (cookie: string, name: string): string | null => {
   const src = '; ' + cookie;
@@ -129,6 +140,17 @@ export class Camada {
     return this.env?.trustedProxy ?? this.snap?.config?.trusted_proxy ?? null;   // explicit local override wins
   }
 
+  /** The client IP per the trusted-proxy config. A request with a socket but no readable peer
+   *  (the client reset the connection before camada ran, e.g. behind an async middleware) is
+   *  unidentifiable: core's no-peer X-Forwarded-For walk is for adapters with no socket at all,
+   *  and here it would believe whatever the client wrote. So: null, the stance every ip-bound
+   *  feature already takes (no ip rules, no challenge). */
+  private clientIp(req: IncomingMessage): string | null {
+    const peer = req.socket?.remoteAddress;
+    if (!peer && req.socket) return null;
+    return resolveClientIp(peer, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+  }
+
   private beaconEnabled(): boolean { return this.snap?.config?.beacon !== false; }
 
   /** Queues a row. With CAMADA_SERVERLESS=1 it also starts the POST now: the platform freezes the
@@ -138,6 +160,12 @@ export class Camada {
     q.push(row);
     if (!this.env?.serverless) return;
     if (req?.camadaOpen) return;   // a track() row while the response is open: the finish flush carries it
+    this.flushFor(req);
+  }
+
+  /** Serverless: start the POST now and hand it to waitUntil. Never throws. */
+  private flushFor(req?: CamadaRequest): void {
+    const q = this.queue!;
     guarded(() => {
       // One POST per request: the response-finish flush first waits for that request's track()
       // rows still hashing. flush() is single-in-flight, so a row queued while a POST was
@@ -161,7 +189,7 @@ export class Camada {
     this.snap.ensureFresh(this.env.serverless ? this.waitUntil : undefined);
 
     const { path, query } = pathAndQuery(req);
-    const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+    const ip = this.clientIp(req);
 
     // enforce before anything else, beacon endpoints included — fail open while cold. The custom
     // rules read the user agent and the request headers (§D3); without them every `ua` and
@@ -187,17 +215,17 @@ export class Camada {
     // present. No ip -> no challenge (fail open), the same stance ip rules take.
     if (this.challengeOn && this.kit && ip) {
       // The verify endpoint answers first: a challenged client must be able to reach it.
-      if (req.method === 'POST' && path === this.challengePath) { this.verifyChallenge(req, res, ip); return true; }
+      if (req.method === 'POST' && atEndpoint(req, path, this.challengePath)) { this.verifyChallenge(req, res, ip); return true; }
       if (v.challenge && !this.challengePassed(req, ip)) { this.serveChallengeInner(req, res, ip, path + query); return true; }
     }
 
     if (this.beaconEnabled()) {
-      if (req.method === 'GET' && path === this.scriptPath) {
+      if (req.method === 'GET' && atEndpoint(req, path, this.scriptPath)) {
         res.writeHead(200, { 'content-type': 'application/javascript', 'cache-control': 'public, max-age=3600' });
         res.end(iife);
         return true;
       }
-      if (req.method === 'POST' && path === this.fpPath) {
+      if (req.method === 'POST' && atEndpoint(req, path, this.fpPath)) {
         this.relayBeacon(req, res, ip);
         return true;
       }
@@ -224,10 +252,12 @@ export class Camada {
       req.camadaOpen = true;
       const ship = () => guarded(() => {
         req.camadaOpen = false;
-        // serveChallenge() may have answered from inside the app, and it already shipped the
-        // `blk: "challenge"` row — one request, one event.
-        if (shipped || req.camadaChallenged) return;
+        if (shipped) return;
         shipped = true;
+        // serveChallenge() may have answered from inside the app, and it already shipped the
+        // `blk: "challenge"` row — one request, one event. A track() row queued while the
+        // response was open still needs this finish flush (serverless).
+        if (req.camadaChallenged) { if (this.env?.serverless) this.flushFor(req); return; }
         const ev = this.buildEvent(req, path, query, ip, { rid, sid, newSession });
         ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
         ev.st = res.statusCode;
@@ -266,10 +296,9 @@ export class Camada {
     };
     const fromText = (text: string) => { try { return JSON.parse(text) as unknown; } catch { return null; } };
     if (req.readableEnded) {
-      const b = req.body;
-      const text = typeof b === 'string' ? b : Buffer.isBuffer(b) ? b.toString('utf8') : null;
-      if ((text ?? (b && typeof b === 'object' ? JSON.stringify(b) : '')).length > FP_MAX) { res.writeHead(413).end(); return; }
-      accept(text === null ? b : fromText(text));
+      const b = parsedBody(req);
+      if ((typeof b === 'string' ? b : b ? JSON.stringify(b) : '').length > FP_MAX) { res.writeHead(413).end(); return; }
+      accept(typeof b === 'string' ? fromText(b) : b);
       return;
     }
     const chunks: Buffer[] = [];
@@ -295,7 +324,7 @@ export class Camada {
   private serveChallengeInner(req: CamadaRequest, res: ServerResponse, ip: string, target: string): void {
     const to = safeReturnTo(target);
     if (wantsHtml((req.headers.accept as string) ?? null, (req.headers['sec-fetch-dest'] as string) ?? null)) {
-      writeChallengePage(res, challengePage({ nonce: this.kit!.nonce(ip, Date.now()), action: this.challengePath, to }));
+      writeChallengePage(res, { nonce: this.kit!.nonce(ip, Date.now()), action: this.challengePath, to });
     } else {
       writeChallengeJson(res);
     }
@@ -323,7 +352,7 @@ export class Camada {
       const to = safeReturnTo(form.to);
       const now = Date.now();
       if (!this.kit!.verify(ip, now, form.nonce, form.solution)) {
-        writeChallengePage(res, challengePage({ nonce: this.kit!.nonce(ip, now), action: this.challengePath, to }));
+        writeChallengePage(res, { nonce: this.kit!.nonce(ip, now), action: this.challengePath, to });
         return;
       }
       res.writeHead(302, {
@@ -372,7 +401,7 @@ export class Camada {
     const { path, query } = pathAndQuery(req);
     const cfg = this.snap?.config;
     if ((cfg?.exclude || []).some((x) => path.startsWith(x)) || Math.random() >= (cfg?.sample ?? 1)) return;
-    const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+    const ip = this.clientIp(req);
     const ev = this.buildEvent(req, path, query, ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
     ev.ts = t0;
     ev.st = 101;
@@ -386,7 +415,7 @@ export class Camada {
   serveChallenge(req: IncomingMessage, res: ServerResponse): boolean {
     return guarded(() => {
       if (this.disabled || !this.kit || !this.queue) return false;
-      const ip = resolveClientIp(req.socket?.remoteAddress, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+      const ip = this.clientIp(req);
       if (!ip || this.challengePassed(req, ip)) return false;   // unidentifiable client: fail open
       (req as CamadaRequest).camadaChallenged = true;
       const { path, query } = pathAndQuery(req as CamadaRequest);
