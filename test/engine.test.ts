@@ -497,3 +497,26 @@ describe('serverless (CAMADA_SERVERLESS=1)', () => {
     expect(engine.queue!.size).toBe(2);
   });
 });
+
+describe('stop()', () => {
+  it('returns a promise that settles once rows held by a 429 are sent (RF-4, camada-all-a4m9)', async () => {
+    const a = fakeAnalyst();
+    let limited = true;
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/e') && limited) { limited = false; return new Response(null, { status: 429, headers: { 'retry-after': '30' } }); }
+      return a.fetchImpl(url, init);
+    }) as typeof fetch;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const engine = engineWith(a, {}, { fetchImpl });
+    await loaded(engine);
+    engine.queue!.push({ et: 'held' });
+    await engine.queue!.flush();
+    expect(engine.queue!.size).toBe(1);   // held by the 429
+    const p = engine.stop();
+    expect(p).toBeInstanceOf(Promise);
+    await p;
+    expect(a.events.flat()).toEqual([{ et: 'held' }]);
+    expect(engine.queue!.size).toBe(0);
+    vi.restoreAllMocks();
+  });
+});
