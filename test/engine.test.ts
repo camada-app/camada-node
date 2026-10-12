@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { connect } from 'node:net';
+import { connect, Socket } from 'node:net';
+import { IncomingMessage, ServerResponse } from 'node:http';
 import { version } from '../package.json';
 import type { Camada } from '../src/index.js';
 import iife from '@camada/browser/iife-string';
@@ -446,6 +447,34 @@ describe('serverless (CAMADA_SERVERLESS=1)', () => {
     expect(held.length).toBeGreaterThan(0);
     await Promise.all(held);
     expect((a.events.flat() as Array<Record<string, unknown>>).some((e) => e.et === 'login_failed')).toBe(true);
+  });
+
+  it('a track() row queued before serveChallenge() rides the request\'s finish flush (R1-13)', async () => {
+    // A response object with no socket yet: 'finish' fires only when the test says so, which
+    // pins the order that loses the row — the track() hash lands after serveChallenge()'s own
+    // flush went out, while the response is still open.
+    const a = fakeAnalyst();
+    const engine = engineWith(a, { CAMADA_SERVERLESS: '1' });
+    open.push(engine);
+    await loaded(engine);
+    vi.useFakeTimers({ toFake: ['setInterval'] });
+    const sock = new Socket();
+    Object.defineProperty(sock, 'remoteAddress', { value: '127.0.0.1' });
+    const req = new IncomingMessage(sock);
+    Object.assign(req, { method: 'GET', url: '/login', headers: { host: 'a', accept: 'text/html', 'sec-fetch-dest': 'document' } });
+    const res = new ServerResponse(req);
+    expect(engine.handle(req, res)).toBe(false);
+    engine.track(req, 'login_failed', { user: 'a@b.c' });
+    expect(engine.serveChallenge(req, res)).toBe(true);
+    await settle(50);
+    expect(engine.queue!.size).toBe(1);   // the hashed row, after the challenge row's POST
+    res.emit('finish');
+    await settle(50);
+    const evs = a.events.flat() as Array<Record<string, unknown>>;
+    expect(evs).toContainEqual(expect.objectContaining({ blk: 'challenge', st: 403 }));
+    expect(evs).toContainEqual(expect.objectContaining({ et: 'login_failed' }));
+    expect(engine.queue!.size).toBe(0);
+    sock.destroy();
   });
 
   it('keeps batching in timer mode', async () => {

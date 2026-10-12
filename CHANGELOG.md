@@ -20,6 +20,30 @@ Needs `@camada/core` with `challengePageCsp` (next release after 0.5.1).
   `Content-Security-Policy` that allows only its inline script and style by hash, and drops any
   inherited `Content-Security-Policy` / `Content-Security-Policy-Report-Only` (camada-all-mwpo).
 
+- A client that reset its connection before camada ran (behind an async middleware) left no
+  readable peer address, and the trusted-proxy walk then believed its `X-Forwarded-For`, so a
+  spoofed address could evade a block or frame someone else. When the request has a socket but
+  no peer, camada now resolves no IP, which is the same as any unidentifiable client: no ip rules
+  and no challenge (camada-all-yfc6).
+- `CAMADA_SERVERLESS=1`: a `track()` row queued before `serveChallenge()` answered the request is
+  flushed when the response finishes, instead of waiting in the queue (camada-all-fcc3).
+- Koa: behind `@koa/bodyparser` / `koa-bodyparser`, challenge verification failed every time
+  and beacons were dropped. The adapter now hands `ctx.request.body` to the engine
+  (camada-all-r3s6).
+- The challenge page's CSP is computed for the page's own `bits`.
+- The challenge page's CSP no longer sets `form-action`. Browsers also apply it to the redirects
+  after the verify POST, so an app that sent the browser on to an external sign-in was blocked
+  (through `@camada/core`, camada-all-mwpo).
+
+### Changed
+
+- camada's own endpoints (`/_cam/b.js`, `/_cam/fp`, `/__camada/challenge`) answer at the
+  mount-relative path as well as the full path. `app.use('/api', camada.express())` serves them
+  under `/api` again, as it did before the `originalUrl` change above, while rules and events keep
+  the full path (camada-all-6ogs).
+- Koa under `koa-mount`: rules and events now see the full path (`/api/…`), not the
+  mount-stripped one. The adapter copies Koa's `ctx.originalUrl` to the request (camada-all-6ogs).
+
 ### Added
 
 - `createCamada({ waitUntil })`: with `CAMADA_SERVERLESS=1`, every per-request flush and lazy

@@ -3,6 +3,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import type { Server } from 'node:http';
+import { connect } from 'node:net';
 import { CHALLENGE_COOKIE } from '@camada/core';
 import { fakeAnalyst, engineWith, loaded, settle, BLOCKED_IP, CHALLENGED_IP, type FakeAnalyst } from './harness.js';
 import { camadaFastify } from '../src/fastify.js';
@@ -137,12 +138,12 @@ async function expectRealPaths(base: string, a: FakeAnalyst, engine: { queue: { 
 }
 
 /** Solves a served challenge (correct -> 302 + _cch, wrong -> 403 page) and posts a beacon (204 + sig:1 row). */
-async function expectBodyEndpoints(base: string, a: FakeAnalyst, engine: { queue: { flush(): Promise<void> } | null }) {
+async function expectBodyEndpoints(base: string, a: FakeAnalyst, engine: { queue: { flush(): Promise<void> } | null }, prefix = '') {
   const xff = { 'x-forwarded-for': CHALLENGED_IP };
-  const page = await fetch(`${base}/cart`, { headers: { ...html, ...xff } });
+  const page = await fetch(`${base}${prefix}/cart`, { headers: { ...html, ...xff } });
   expect(page.status).toBe(403);
   const nonce = nonceOf(await page.text());
-  const post = (body: string) => fetch(`${base}/__camada/challenge`, {
+  const post = (body: string) => fetch(`${base}${prefix}/__camada/challenge`, {
     method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(2000),
     headers: { ...xff, 'content-type': 'application/x-www-form-urlencoded' }, body,
   });
@@ -154,13 +155,22 @@ async function expectBodyEndpoints(base: string, a: FakeAnalyst, engine: { queue
   expect(right.headers.get('location')).toBe('/cart');
   expect(right.headers.get('set-cookie')).toContain(`${CHALLENGE_COOKIE}=`);
   a.events.length = 0;
-  const fp = await fetch(`${base}/_cam/fp`, {
+  const fp = await fetch(`${base}${prefix}/_cam/fp`, {
     method: 'POST', signal: AbortSignal.timeout(2000),
     headers: { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.9' },
     body: JSON.stringify({ rid: 'abc', tz: 'UTC' }),
   });
   expect(fp.status).toBe(204);
   expect(await rows(a, engine)).toContainEqual(expect.objectContaining({ sig: 1, rid: 'abc', tz: 'UTC', ip: '9.9.9.9' }));
+}
+
+/** camada's own endpoints answer under a prefix mount at `${prefix}/…` (R1-19). */
+async function expectOwnEndpoints(base: string, prefix: string) {
+  const js = await fetch(`${base}${prefix}/_cam/b.js`);
+  expect(js.status).toBe(200);
+  expect(js.headers.get('content-type')).toContain('javascript');
+  const fp = await fetch(`${base}${prefix}/_cam/fp`, { method: 'POST', signal: AbortSignal.timeout(2000), body: '{"rid":"x"}' });
+  expect(fp.status).toBe(204);
 }
 
 async function nestApp(engine: ReturnType<typeof engineWith>) {
@@ -208,6 +218,13 @@ describe('express mounts', () => {
     await expectRealPaths(await expressApp((app, mw) => app.use('/api', mw), engine), a, engine, '/api');
   });
 
+  it('a prefix mount still answers its own endpoints under the prefix (R1-19)', async () => {
+    const { a, engine } = await ready(true);
+    const base = await expressApp((app, mw) => app.use('/api', mw), engine);
+    await expectOwnEndpoints(base, '/api');
+    await expectBodyEndpoints(base, a, engine, '/api');
+  });
+
   it("a wildcard mount (what Nest <= 10 registers for routes: '*') still sees the real path", async () => {
     const { a, engine } = await ready(true);
     await expectRealPaths(await expressApp((app, mw) => app.use('*', mw), engine), a, engine);
@@ -217,6 +234,59 @@ describe('express mounts', () => {
     const { a, engine } = await ready(true);
     const { default: express } = await import('express');
     await expectBodyEndpoints(await expressApp((app, mw) => { app.use(express.json(), express.urlencoded({ extended: false }), mw); }, engine), a, engine);
+  });
+
+  it('express.raw({ type: "*/*" }) first: a Buffer body still verifies and relays (R1-16)', async () => {
+    const { a, engine } = await ready(true);
+    const { default: express } = await import('express');
+    await expectBodyEndpoints(await expressApp((app, mw) => { app.use(express.raw({ type: '*/*' }), mw); }, engine), a, engine);
+  });
+
+  it('express.text({ type: "*/*" }) first: a string body still verifies and relays (R1-16)', async () => {
+    const { a, engine } = await ready(true);
+    const { default: express } = await import('express');
+    await expectBodyEndpoints(await expressApp((app, mw) => { app.use(express.text({ type: '*/*' }), mw); }, engine), a, engine);
+  });
+
+  it('an oversized body a parser already drained: verify re-serves the page, the beacon is 413 (R1-16)', async () => {
+    const { a, engine } = await ready(true);
+    const { default: express } = await import('express');
+    const base = await expressApp((app, mw) => { app.use(express.text({ type: '*/*', limit: '1mb' }), mw); }, engine);
+    const big = 'x'.repeat(40 * 1024);
+    const ch = await fetch(`${base}/__camada/challenge`, {
+      method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(2000),
+      headers: { 'x-forwarded-for': CHALLENGED_IP }, body: `nonce=x&solution=1&to=%2F&pad=${big}`,
+    });
+    expect(ch.status).toBe(403);
+    expect(ch.headers.get('x-camada-challenge')).toBe('1');
+    expect(ch.headers.get('set-cookie')).toBeNull();
+    a.events.length = 0;
+    const fp = await fetch(`${base}/_cam/fp`, { method: 'POST', signal: AbortSignal.timeout(2000), body: JSON.stringify({ rid: 'big', pad: big }) });
+    expect(fp.status).toBe(413);
+    expect((await rows(a, engine)).filter((e) => e.sig)).toHaveLength(0);
+  });
+
+  it('object bodies with array values: verify ignores non-string fields, the beacon keeps them (R1-16)', async () => {
+    const { a, engine } = await ready(true);
+    const { default: express } = await import('express');
+    const base = await expressApp((app, mw) => { app.use(express.json(), express.urlencoded({ extended: true }), mw); }, engine);
+    const page = await fetch(`${base}/cart`, { headers: { ...html, 'x-forwarded-for': CHALLENGED_IP } });
+    const nonce = nonceOf(await page.text());
+    const ch = await fetch(`${base}/__camada/challenge`, {
+      method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(2000),
+      headers: { 'x-forwarded-for': CHALLENGED_IP, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `nonce=${nonce}&solution=${solve(nonce)}&solution=1&to=%2Fcart`,   // repeated -> an array
+    });
+    expect(ch.status).toBe(403);
+    expect(ch.headers.get('set-cookie')).toBeNull();
+    a.events.length = 0;
+    const post = (body: string) => fetch(`${base}/_cam/fp`, {
+      method: 'POST', signal: AbortSignal.timeout(2000), headers: { 'content-type': 'application/json' }, body,
+    });
+    expect((await post('{"rid":"arr","langs":["en","pt"]}')).status).toBe(204);
+    expect((await post('[1,2]')).status).toBe(204);   // not an object: answered, never shipped
+    const sig = (await rows(a, engine)).filter((e) => e.sig);
+    expect(sig).toEqual([expect.objectContaining({ rid: 'arr', langs: ['en', 'pt'] })]);
   });
 
   it('a body read by something that left no req.body is still answered at once', async () => {
@@ -230,5 +300,69 @@ describe('express mounts', () => {
     expect(ch.status).toBe(403);
     const fp = await fetch(`${base}/_cam/fp`, { method: 'POST', signal: AbortSignal.timeout(2000), body: '{"rid":"x"}' });
     expect(fp.status).toBe(204);
+  });
+});
+
+// R1-1: a client that resets its socket before camada runs leaves no readable peer address. With
+// a cidrs (Cloudflare-style) config the X-Forwarded-For walk would then believe whatever the
+// client wrote: a spoofed blocked ip (victim framing) or any clean ip (block evasion).
+describe('client ip with the peer already gone', () => {
+  it('an adapter with a socket but no readable peer resolves no ip instead of believing X-Forwarded-For', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'cidrs:173.245.48.0/20,103.21.244.0/22,127.0.0.0/8' });
+    closers.push(() => engine.stop());
+    await loaded(engine);
+    const { default: express } = await import('express');
+    const app = express();
+    let peer: unknown = 'unset';
+    app.use((req, _res, next) => { setTimeout(() => { peer = req.socket?.remoteAddress; next(); }, 60); });   // async middleware first
+    app.use(engine.express());
+    app.use((_req, res) => { res.send('app'); });
+    const server = await listen(app);
+    closers.push(() => new Promise((r) => server.close(r)));
+    const seen: Array<string | null | undefined> = [];
+    const verdict = engine.snap!.verdict.bind(engine.snap!);
+    engine.snap!.verdict = (input) => { seen.push(input.ip); return verdict(input); };
+    a.events.length = 0;
+    await new Promise<void>((resolve) => {
+      const s = connect(portOf(server), '127.0.0.1', () => {
+        s.write(`POST /x HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: ${BLOCKED_IP}\r\nContent-Length: 2\r\n\r\nhi`);
+        setTimeout(() => { s.resetAndDestroy(); resolve(); }, 10);
+      });
+      s.on('error', () => {});
+    });
+    await settle(150);
+    expect(peer).toBeUndefined();   // the precondition: node really lost the peer
+    expect(seen).toEqual([null]);   // camada ran, with no ip: no ip rule can match, none can be framed
+    const evs = await rows(a, engine);
+    expect(evs.filter((e) => e.ip === BLOCKED_IP)).toHaveLength(0);
+    expect(evs.filter((e) => e.blk)).toHaveLength(0);
+  });
+});
+
+describe('koa: body parser first, mounts (R1-14, R1-19)', () => {
+  async function koaApp(build: (app: import('koa')) => void) {
+    const { default: Koa } = await import('koa');
+    const app = new Koa();
+    build(app);
+    app.use(async (ctx) => { ctx.body = 'app'; });
+    const server = await listen(app as never);
+    closers.push(() => new Promise((r) => server.close(r)));
+    return `http://127.0.0.1:${portOf(server)}`;
+  }
+
+  it('@koa/bodyparser before camada: verify passes (302 + _cch) and the beacon ships', async () => {
+    const { a, engine } = await ready(true);
+    const { bodyParser } = await import('@koa/bodyparser');
+    await expectBodyEndpoints(await koaApp((app) => { app.use(bodyParser()); app.use(camadaKoa(engine)); }), a, engine);
+  });
+
+  it('koa-mount: own endpoints answer under the prefix, events and path rules see the full path', async () => {
+    const { a, engine } = await ready(true);
+    const { default: mount } = await import('koa-mount');
+    const base = await koaApp((app) => { app.use(mount('/api', camadaKoa(engine) as never)); });
+    await expectOwnEndpoints(base, '/api');
+    await expectRealPaths(base, a, engine, '/api');
+    await expectBodyEndpoints(base, a, engine, '/api');
   });
 });
