@@ -23,8 +23,16 @@ CAMADA_INGEST_URL=http://localhost:8787        # dev only; defaults to productio
 **Express / Connect**
 ```js
 import camada from '@camada/node';
-app.use(camada.express());
+app.use(camada.express());   // before express.json() / urlencoded() and before helmet
 ```
+Mount camada first. It still works behind body parsers (it uses the `req.body` they leave for
+its challenge and beacon POSTs) and behind helmet (the challenge page replaces any inherited
+`Content-Security-Policy` with its own), but first is cheapest: a blocked request never pays for
+parsing. Under a prefix (`app.use('/api', camada.express())`) rules and events see the full path
+(`/api/…`), and camada's own endpoints answer under the prefix (`/api/_cam/b.js`, `/api/_cam/fp`,
+`/api/__camada/challenge`). The beacon tag (`scriptTag()`) and the challenge form point under the
+prefix too, unless you set `scriptPath` or `challengePath` yourself: an explicit path is used
+exactly as given. The beacon posts next to its script, so `fpPath` can stay as it is.
 
 **Fastify**
 ```js
@@ -37,12 +45,18 @@ await app.register(camadaFastify);
 import { CamadaModule } from '@camada/node/nest';
 @Module({ imports: [CamadaModule.forRoot()] })   // Nest ≤10: CamadaModule.forRoot({ routes: '*' })
 ```
+Nest registers its body parsers before module middleware; camada reads what they parsed, so the
+default `bodyParser: true` is fine. Tested on Nest 11. Nest 10 (`routes: '*'`) is checked through
+the Express 4 wildcard mount it registers, not against Nest 10 itself.
 
 **Koa**
 ```js
 import { camadaKoa } from '@camada/node/koa';
-app.use(camadaKoa());
+app.use(camadaKoa());   // before @koa/bodyparser
 ```
+Register it first. Behind `@koa/bodyparser` or `koa-bodyparser` it reads the form and beacon from
+`ctx.request.body`. Under `koa-mount` it works like an Express prefix mount: rules and events see the
+full path, and its own endpoints answer under the prefix.
 
 ## What it does per request
 
@@ -50,6 +64,9 @@ app.use(camadaKoa());
    poll and event batch carries `x-camada-sdk: @camada/node/<version>`.
 2. Resolves the client IP per your tenant's trusted-proxy config — raw `X-Forwarded-For` is
    never trusted without it (`CAMADA_TRUSTED_PROXY=hops:1|cidrs:…|vercel` overrides locally).
+   On a unix-socket listener (nginx or Passenger in front) Node has no peer address, so the walk
+   runs without one and trusts the local proxy that owns the socket. A TCP request whose peer is
+   already gone (the client reset the connection) gets no IP: no ip rules, no challenge.
 3. Runs your ordered custom rules (see below), then the allow, block and challenge lists.
    Blocked → `403` with `x-block-reason` before your app; the event still ships, with
    `st: 403` and `blk: <reason>` (ip4|ip6|path|rule) so the analyst counts SDK blocks apart
@@ -145,7 +162,17 @@ handshake your library then rejects still ships `st: 101`.
 
 - `CAMADA_DISABLED=1` — kill switch, checked per request.
 - `CAMADA_SERVERLESS=1` — lazy snapshot refresh (no interval timer); cold invocations fail
-  open and catch up asynchronously.
+  open and catch up asynchronously. Each request's event (and every `track()` row) is POSTed as
+  the response finishes instead of waiting for the 15 s batch timer, which a frozen function
+  never runs. Pass the platform's `waitUntil` so the invocation stays alive for that POST:
+  ```js
+  import { waitUntil } from '@vercel/functions';
+  const camada = createCamada({ waitUntil });   // also holds the lazy snapshot refresh open
+  ```
+  Where the platform has no `waitUntil`, the POST starts before the response completes but can
+  still be frozen mid-flight; use a fetch adapter (`@camada/hono`, `@camada/next`) there.
+- The challenge page sends its own `Content-Security-Policy` allowing only its inline script and
+  style by `sha256` hash, and drops any `Content-Security-Policy(-Report-Only)` set before it.
 - Enforcement scope at this position: IP, path, user-agent and request-header conditions. ASN,
   country and TLS-fingerprint conditions can't be evaluated in-app and fail open (a rule that
   needs one never matches here; run `@camada/hono` on Cloudflare Workers for those).
