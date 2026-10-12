@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 (2026-10-12; follows 0.3.1)
 
-Needs `@camada/core` with `challengePageCsp` (next release after 0.5.1).
+Needs `@camada/core` with `challengePageCsp` (0.5.2).
 
 ### Fixed
 
