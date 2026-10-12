@@ -339,9 +339,11 @@ describe('express mounts', () => {
 // a cidrs (Cloudflare-style) config the X-Forwarded-For walk would then believe whatever the
 // client wrote: a spoofed blocked ip (victim framing) or any clean ip (block evasion).
 describe('client ip with the peer already gone', () => {
-  it('an adapter with a socket but no readable peer resolves no ip instead of believing X-Forwarded-For', async () => {
+  // Every mode, not only cidrs (contract C6 v3.1): hops and vercel never look at the peer, so a
+  // resolve with XFF would take the client's own entry there.
+  for (const mode of ['cidrs:173.245.48.0/20,103.21.244.0/22,127.0.0.0/8', 'hops:1', 'vercel']) it(`${mode.split(':')[0]}: an adapter with a socket but no readable peer resolves no ip instead of believing X-Forwarded-For`, async () => {
     const a = fakeAnalyst();
-    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'cidrs:173.245.48.0/20,103.21.244.0/22,127.0.0.0/8' });
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: mode });
     closers.push(() => engine.stop());
     await loaded(engine);
     const { default: express } = await import('express');
