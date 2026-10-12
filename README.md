@@ -176,6 +176,9 @@ handshake your library then rejects still ships `st: 101`.
 - Enforcement scope at this position: IP, path, user-agent and request-header conditions. ASN,
   country and TLS-fingerprint conditions can't be evaluated in-app and fail open (a rule that
   needs one never matches here; run `@camada/hono` on Cloudflare Workers for those).
+- `await camada.stop()` in your own graceful shutdown stops polling and the event queue. It
+  returns a promise that settles once queued rows (a drain in flight, or rows held by an ingest
+  429) are sent, or counted as dropped if the send fails; it never rejects.
 - Memory: ~5 MB per loaded snapshot.
 
 ## Develop
