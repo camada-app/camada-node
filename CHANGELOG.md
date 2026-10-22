@@ -12,6 +12,14 @@
   core's matcher, so v3/v4 `tls` entries and v5 `tlsx` rule conditions match on node. Events still
   carry no `tlsx`. (camada-all-8pn9)
 
+### Fixed
+
+- A signalled response (`x-camada-challenge: 1`) now also sets `cdn-cache-control`,
+  `surrogate-control`, `cloudflare-cdn-cache-control`, `vercel-cdn-cache-control` and
+  `netlify-cdn-cache-control` to `no-store`, overriding the app's. CDNs read those ahead of
+  `cache-control`, so an app-set one could still let a shared cache keep the per-client copy.
+  (camada-all-5pog)
+
 ## 0.3.2 (2026-10-12; follows 0.3.1)
 
 Needs `@camada/core` with `challengePageCsp` (0.5.2).
