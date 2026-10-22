@@ -123,6 +123,23 @@ describe('ordered custom rules', () => {
     expect(ev.blk).toBeUndefined();   // warn is not a block: the traffic passed
   });
 
+  it('keeps wrn on the chs row when handle() sampled the request out and serveChallenge() signals it', async () => {
+    const a = fakeAnalyst();
+    a.v5 = true;
+    a.config = { ...a.config, sample: 0 };
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      if (engine.serveChallenge(req, res)) return;
+      res.writeHead(200).end('{}');
+    });
+    open.push(app, engine);
+    a.events.length = 0;
+    await fetch(`${app.url}/`, { headers: { accept: 'application/json', 'x-forwarded-for': '8.8.8.8', 'user-agent': WARN_UA } });
+    expect((await shipped(a, engine)).at(-1)).toMatchObject({ chs: 1, wrn: 'cr_00000000000e' });
+  });
+
   it('leaves an unmatched request alone', async () => {
     const { a, engine, app } = await v5App();
     expect((await fetch(`${app.url}/`, { headers: { 'x-forwarded-for': '8.8.8.8', 'user-agent': 'Mozilla/5.0' } })).status).toBe(200);

@@ -298,6 +298,30 @@ describe('serveChallenge()', () => {
   });
 });
 
+describe('signalled cache-control (82ar)', () => {
+  it('ends no-store whichever way the app sets cache-control; an unsignalled response keeps its own', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const cc = 'public, max-age=300';
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      if (req.url === '/set') res.setHeader('cache-control', cc);
+      if (req.url === '/hook' && engine.serveChallenge(req, res)) return;
+      if (req.url === '/hook') { res.writeHead(200, { 'cache-control': cc }).end('{}'); return; }
+      if (req.url === '/append') res.appendHeader('cache-control', cc);
+      res.writeHead(200, req.url === '/head' ? { 'cache-control': cc } : {}).end('{}');
+    });
+    open.push(app, engine);
+    const get = (path: string, ip: string) => fetch(`${app.url}${path}`, { headers: { accept: 'application/json', 'x-forwarded-for': ip } });
+    for (const path of ['/set', '/head', '/append', '/hook']) {
+      expect((await get(path, CHALLENGED_IP)).headers.get('cache-control')).toBe('no-store');
+    }
+    expect((await get('/head', ALLOWED_IP)).headers.get('cache-control')).toBe(cc);
+  });
+});
+
 describe('serveChallenge() on a non-HTML request', () => {
   it('sets the header, stamps chs: 1 and returns false so the app answers', async () => {
     const a = fakeAnalyst();
