@@ -1,13 +1,13 @@
 // CAMADA_TLSX_HEADER (camada-all-8pn9): the TLS fingerprint a trusted proxy (a Cloudflare Transform
 // Rule) writes into a header feeds core's matcher, so v3/v4 `tls` entries and v5 `tlsx` rule
 // conditions bite on node like on @camada/core based SDKs. It is believed only in cidrs mode from a
-// trusted-proxy peer, and it never rides the wire event.
+// trusted-proxy peer, and the same trusted value rides the wire event (camada-all-bcsf).
 import { describe, it, expect, afterEach } from 'vitest';
 import { Socket } from 'node:net';
 import { IncomingMessage, ServerResponse } from 'node:http';
 import type { Camada } from '../src/index.js';
 import type { TrustedProxyConfig } from '@camada/core';
-import { fakeAnalyst, engineWith, loaded, settle, V5_META, ALLOWED_IP, type FakeAnalyst } from './harness.js';
+import { fakeAnalyst, engineWith, loaded, settle, V5_META, ALLOWED_IP, CHALLENGED_IP, type FakeAnalyst } from './harness.js';
 
 const open: Camada[] = [];
 afterEach(() => { for (const e of open.splice(0)) e.stop(); });
@@ -38,11 +38,11 @@ async function engine(a: FakeAnalyst, env: Record<string, string | undefined> = 
 }
 
 /** One request through handle() with a chosen socket peer (`null`: a TCP socket that has none). */
-function hit(e: Camada, peer: string | null, headers: Record<string, string | string[]> = {}) {
+function hit(e: Camada, peer: string | null, headers: Record<string, string | string[]> = {}, extra: Record<string, unknown> = {}) {
   const sock = new Socket();
   Object.defineProperty(sock, 'remoteAddress', { value: peer ?? undefined });
   const req = new IncomingMessage(sock);
-  Object.assign(req, { method: 'GET', url: '/', headers: { host: 'a', ...headers } });
+  Object.assign(req, { method: 'GET', url: '/', headers: { host: 'a', ...headers }, ...extra });
   const res = new ServerResponse(req);
   const blocked = e.handle(req, res);
   sock.destroy();
@@ -188,15 +188,104 @@ describe('tlsx header, v5 rules', () => {
 });
 
 describe('wire event', () => {
-  it('carries no tlsx, blocked or not', async () => {
+  const HTML = { accept: 'text/html', 'sec-fetch-dest': 'document' };
+  const rows = async (a: FakeAnalyst, e: Camada) => { await settle(); await e.queue!.flush(); return (a.events.flat() as Array<Record<string, unknown>>); };
+  /** One request per scenario; every event it ships must carry no tlsx key. */
+  const noTlsx = async (e: Camada, a: FakeAnalyst, peer: string | null, headers: Record<string, string | string[]>) => {
+    const r = hit(e, peer, headers);
+    r.res.emit('finish');
+    const evs = await rows(a, e);
+    a.events.length = 0;
+    expect(evs.length).toBeGreaterThanOrEqual(1);
+    for (const ev of evs) expect(ev).not.toHaveProperty('tlsx');
+  };
+
+  it('carries tlsx on the pass event and the 403 tls block event from a trusted peer', async () => {
     const a = fakeAnalyst();
     const e = await engine(a);
-    hit(e, TRUSTED, { [HDR]: TLSX });                       // blocked
-    const ok = hit(e, TRUSTED, { [HDR]: 'ffff0000' });      // passes
-    ok.res.emit('finish');
-    await settle(); await e.queue!.flush();
-    const evs = a.events.flat() as Array<Record<string, unknown>>;
-    expect(evs.length).toBeGreaterThanOrEqual(1);
-    for (const ev of evs) expect(JSON.stringify(ev)).not.toMatch(/tlsx|9f0a77c2|ffff0000/);
+    hit(e, TRUSTED, { [HDR]: TLSX });                       // blocked (tls)
+    hit(e, TRUSTED, { [HDR]: 'ffff0000' }).res.emit('finish');   // passes
+    const evs = await rows(a, e);
+    expect(evs).toHaveLength(2);
+    expect(evs.find((ev) => ev.blk === 'tls')).toMatchObject({ st: 403, tlsx: TLSX });
+    expect(evs.find((ev) => ev.blk !== 'tls')).toMatchObject({ tlsx: 'ffff0000' });
+  });
+
+  it('carries tlsx on a 403 rule block event', async () => {
+    const a = fakeAnalyst(); a.v5 = true;
+    const e = await engine(a);
+    expect(hit(e, TRUSTED, { [HDR]: 'aaaa1111' }).rule).toBe('cr_tlsx_is');
+    expect(await rows(a, e)).toEqual([expect.objectContaining({ st: 403, blk: 'rule', tlsx: 'aaaa1111' })]);
+  });
+
+  it('carries tlsx on the challenge-serve event', async () => {
+    const a = fakeAnalyst(); a.v4 = true;
+    const e = await engine(a);
+    const r = hit(e, TRUSTED, { ...HTML, [HDR]: 'ffff0000', 'x-forwarded-for': CHALLENGED_IP });
+    expect(r.res.statusCode).toBe(403);
+    expect(await rows(a, e)).toEqual([expect.objectContaining({ st: 403, blk: 'challenge', tlsx: 'ffff0000' })]);
+  });
+
+  it('ships no tlsx from a peer outside the cidrs, including a probe address', async () => {
+    const a = fakeAnalyst(); const e = await engine(a);
+    await noTlsx(e, a, '8.8.8.8', { [HDR]: TLSX });
+    await noTlsx(e, a, '192.0.2.1', { [HDR]: TLSX });
+  });
+
+  it.each(['none', 'hops:1', 'vercel'])('ships no tlsx in %s mode', async (mode) => {
+    const a = fakeAnalyst();
+    const e = await engine(a, { CAMADA_TRUSTED_PROXY: mode });
+    await noTlsx(e, a, TRUSTED, { [HDR]: TLSX });
+  });
+
+  it('ships no tlsx when the trusted-proxy mode is unset (server config none)', async () => {
+    const a = fakeAnalyst();
+    const e = await engine(a, { CAMADA_TRUSTED_PROXY: undefined });
+    await noTlsx(e, a, TRUSTED, { [HDR]: TLSX });
+  });
+
+  it('ships no tlsx when the env var is unset', async () => {
+    const a = fakeAnalyst();
+    const e = await engine(a, { CAMADA_TLSX_HEADER: undefined });
+    await noTlsx(e, a, TRUSTED, { [HDR]: TLSX });
+  });
+
+  it('ships no tlsx for a malformed, over-long or repeated value', async () => {
+    const a = fakeAnalyst(); const e = await engine(a);
+    for (const v of ['a'.repeat(129), TLSX + ' x', '9f0a77c2!', `${TLSX}, ${TLSX}`, [TLSX, TLSX]]) await noTlsx(e, a, TRUSTED, { [HDR]: v });
+  });
+
+  it.each(['127.0.0.1', '::1', '::ffff:127.0.0.1'])('ships no tlsx from loopback peer %s', async (peer) => {
+    const a = fakeAnalyst(); const e = await engine(a);
+    await noTlsx(e, a, peer, { [HDR]: TLSX, 'x-forwarded-for': TRUSTED });
+  });
+
+  it('ships no tlsx with no readable peer', async () => {
+    const a = fakeAnalyst(); const e = await engine(a);
+    await noTlsx(e, a, null, { [HDR]: TLSX });
+  });
+
+  it('never puts tlsx on a track() row or a beacon-relay row', async () => {
+    const a = fakeAnalyst();
+    const e = await engine(a);
+    const sock = new Socket();
+    Object.defineProperty(sock, 'remoteAddress', { value: TRUSTED });
+    const req = new IncomingMessage(sock);
+    Object.assign(req, { method: 'GET', url: '/', headers: { host: 'a', [HDR]: 'ffff0000' } });
+    const res = new ServerResponse(req);
+    e.handle(req, res);
+    res.emit('finish');
+    e.track(req, 'login_failed', { user: 'u' });
+    const bres = new ServerResponse(req);
+    const beacon = new IncomingMessage(sock);
+    Object.assign(beacon, { method: 'POST', url: '/_cam/fp', headers: { host: 'a', [HDR]: 'ffff0000' }, body: { rid: 'abc', tz: 'UTC' } });
+    Object.defineProperty(beacon, 'readableEnded', { value: true });
+    e.handle(beacon, bres);
+    const evs = await rows(a, e);
+    sock.destroy();
+    expect(evs.find((ev) => ev.et === 'login_failed')).toBeDefined();
+    expect(evs.find((ev) => ev.sig === 1)).toBeDefined();
+    expect(evs.find((ev) => !ev.et && !ev.sig)).toHaveProperty('tlsx', 'ffff0000');   // the request row does
+    for (const ev of evs.filter((x) => x.et || x.sig)) expect(ev).not.toHaveProperty('tlsx');
   });
 });
