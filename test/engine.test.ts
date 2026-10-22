@@ -292,6 +292,21 @@ describe('first-party beacon', () => {
     for (const k of ['tlsx', 'ja4', 'asn', 'cc', 'sid', 'ns', 'st', 'dur', 'rt', 'blk', 'rl', 'wrn', 'chs', 'ch', 'et', 'uid']) expect(rows[0]).not.toHaveProperty(k);
   });
 
+  it('stamps rts from the relay clock after the body spread (camada-all-wd3b)', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await appWith(engine);
+    const before = Date.now();
+    expect((await fetch(`${app.url}/_cam/fp`, { method: 'POST', body: JSON.stringify({ rid: 'abc', rts: 1 }) })).status).toBe(204);
+    await settle();
+    await engine.queue!.flush();
+    const rts = (a.events.flat() as Array<Record<string, unknown>>)[0].rts as number;
+    expect(Number.isInteger(rts)).toBe(true);
+    expect(rts).toBeGreaterThanOrEqual(before);
+    expect(rts).toBeLessThanOrEqual(Date.now());
+  });
+
   it('drops an unparseable beacon body instead of shipping it', async () => {
     const a = fakeAnalyst();
     const engine = engineWith(a);

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Beacon rows relayed from `/_cam/fp` carry `rts`, the SDK host's receipt time (`Date.now()`, set after the body spread so a browser cannot forge it). The analyst uses it in place of the browser clock for `/e` beacons, so a beacon alone in a batch still joins its request (camada-all-wd3b).
+
 - `CAMADA_TLSX_HEADER` (option `tlsxHeader`): an opt-in header carrying the TLS fingerprint, e.g. a
   Cloudflare Transform Rule setting `x-camada-tlsx` to `cf.tls_client_extensions_sha1`. It is read
   only in `cidrs` trusted-proxy mode when the socket peer is a non-loopback address inside those
