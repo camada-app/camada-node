@@ -101,6 +101,7 @@ describe('tlsx header, v3 tls entry', () => {
   it('ignores the header in a mode the server config delivers (no local override) unless it is cidrs', async () => {
     const a = fakeAnalyst();   // trusted_proxy: none from the server
     const e = await engine(a, { CAMADA_TRUSTED_PROXY: undefined });
+    expect(hit(e, TRUSTED, { [HDR]: TLSX }).blocked).toBe(false);
     const b = fakeAnalyst(); b.config.trusted_proxy = { mode: 'cidrs', cidrs: ['198.18.0.0/15'] };
     const e2 = await engine(b, { CAMADA_TRUSTED_PROXY: undefined });
     expect(hit(e2, TRUSTED, { [HDR]: TLSX }).reason).toBe('tls');

@@ -160,6 +160,10 @@ CAMADA_TRUSTED_PROXY=cidrs:173.245.48.0/20,103.21.244.0/22,…   # Cloudflare's 
 CAMADA_TLSX_HEADER=x-camada-tlsx
 ```
 
+Every range in `CAMADA_TRUSTED_PROXY=cidrs:…` is trusted to write the header, the same trust it gets
+for `X-Forwarded-For`, so list only Cloudflare's ranges there. A non-Cloudflare proxy range (a docker
+bridge, an internal load balancer) would let anyone who reaches that proxy set the fingerprint.
+
 Behind a local reverse proxy (nginx or Caddy on loopback) or a cloudflared tunnel the peer is
 loopback, so the header is not read and `tlsx` conditions fail open; `X-Forwarded-For` is never
 consulted. The same holds in `none`, `hops` or `vercel` mode, from any other peer, with no readable
