@@ -362,6 +362,34 @@ describe('signalled cache-control (82ar)', () => {
   });
 });
 
+describe('signalled CDN-specific cache headers (5pog)', () => {
+  const all = ['cache-control', 'cdn-cache-control', 'surrogate-control', 'cloudflare-cdn-cache-control', 'vercel-cdn-cache-control', 'netlify-cdn-cache-control'];
+  const ways: Record<string, (res: import('node:http').ServerResponse) => void> = {
+    '/set': (res) => { res.setHeader('cdn-cache-control', 'public, max-age=60'); res.setHeader('Surrogate-Control', 'max-age=60'); res.writeHead(200); res.end('{}'); },
+    '/implicit': (res) => { res.setHeader('cdn-cache-control', 'public, max-age=60'); res.setHeader('surrogate-control', 'max-age=60'); res.end('{}'); },
+    '/head': (res) => { res.writeHead(200, { 'CDN-Cache-Control': 'public, max-age=60', 'surrogate-control': 'max-age=60' }).end('{}'); },
+  };
+
+  it('ends every one of them no-store whatever the app sets; an unsignalled response keeps its own', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      ways[req.url!](res);
+    });
+    open.push(app, engine);
+    const get = (path: string, ip: string) => fetch(`${app.url}${path}`, { headers: { accept: 'application/json', 'x-forwarded-for': ip } });
+    for (const path of Object.keys(ways)) {
+      const r = await get(path, CHALLENGED_IP);
+      expect([path, r.headers.get('x-camada-challenge')]).toEqual([path, '1']);
+      for (const h of all) expect([path, h, r.headers.get(h)]).toEqual([path, h, 'no-store']);
+    }
+    expect((await get('/head', ALLOWED_IP)).headers.get('cdn-cache-control')).toBe('public, max-age=60');
+  });
+});
+
 describe('serveChallenge() on a non-HTML request', () => {
   it('sets the header, stamps chs: 1 and returns false so the app answers', async () => {
     const a = fakeAnalyst();
