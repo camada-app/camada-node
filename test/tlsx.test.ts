@@ -82,6 +82,11 @@ describe('tlsx header, v3 tls entry', () => {
     expect(hit(e, '192.0.2.77', { [HDR]: TLSX }).reason).toBe('tls');
   });
 
+  it('trusts a peer inside cidrs wide enough to hold every RFC 5737 range', async () => {
+    const e = await engine(fakeAnalyst(), { CAMADA_TRUSTED_PROXY: 'cidrs:192.0.0.0/4' });
+    expect(hit(e, '205.0.0.9', { [HDR]: TLSX }).reason).toBe('tls');
+  });
+
   it('takes the header name from the tlsxHeader option too, lower-cased', async () => {
     const e = await engine(fakeAnalyst(), { CAMADA_TLSX_HEADER: undefined }, { tlsxHeader: 'X-Fp' });
     expect(hit(e, TRUSTED, { 'x-fp': TLSX }).reason).toBe('tls');
