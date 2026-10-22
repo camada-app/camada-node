@@ -44,7 +44,6 @@ interface CamadaRequest extends IncomingMessage {
   route?: { path?: string };     // Express fills this after routing
   camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
   camadaSignalled?: boolean;     // a non-HTML request passed under a challenge: x-camada-challenge header + `chs: 1` on its event
-  camadaHooked?: boolean;        // the finish hook that ships its event is installed
   camadaOpen?: boolean;          // its event ships on response finish: a track() row until then rides that flush
   camadaTracks?: Promise<void>[];   // track() rows still hashing (serverless: the finish flush waits for them)
   camadaPrefix?: string;         // the mount prefix seen when camada ran (scriptTag() runs later, where req.url is whole again)
@@ -296,33 +295,30 @@ export class Camada {
   /** Installs the response-finish hook that ships the request's normal capture event. */
   private hookCapture(req: CamadaRequest, res: ServerResponse, path: string, query: string, ip: string | null,
     o: { rid: string; sid: string | null; newSession: boolean; t0: number; wrn?: string }): void {
-    req.camadaHooked = true;
-    {
-      // 'finish' when the response went out whole; 'close' alone when the client left first (an
-      // aborted SSE or download), which ships the status set so far and dur up to the abort — the
-      // fetch adapters' cancel semantics. 'close' also follows every 'finish': one event either way.
-      let shipped = false;
-      req.camadaOpen = true;
-      const ship = () => guarded(() => {
-        req.camadaOpen = false;
-        if (shipped) return;
-        shipped = true;
-        // serveChallenge() may have answered from inside the app, and it already shipped the
-        // `blk: "challenge"` row — one request, one event. A track() row queued while the
-        // response was open still needs this finish flush (serverless).
-        if (req.camadaChallenged) { if (this.env?.serverless) this.flushFor(req); return; }
-        const ev = this.buildEvent(req, path, query, ip, o);
-        ev.ts = o.t0;   // the request start: the timeline draws [ts, ts + dur]
-        ev.st = res.statusCode;
-        ev.dur = Date.now() - o.t0;
-        if (req.route?.path) ev.rt = String(req.route.path);
-        if (o.wrn) ev.wrn = o.wrn;   // §D3: the warn rule that let this request through
-        if (req.camadaSignalled) ev.chs = 1;   // challenge signalled (camada-all-82ar)
-        this.enqueue(ev, req);
-      }, undefined);
-      res.once('finish', ship);
-      res.once('close', ship);
-    }
+    // 'finish' when the response went out whole; 'close' alone when the client left first (an
+    // aborted SSE or download), which ships the status set so far and dur up to the abort — the
+    // fetch adapters' cancel semantics. 'close' also follows every 'finish': one event either way.
+    let shipped = false;
+    req.camadaOpen = true;
+    const ship = () => guarded(() => {
+      req.camadaOpen = false;
+      if (shipped) return;
+      shipped = true;
+      // serveChallenge() may have answered from inside the app, and it already shipped the
+      // `blk: "challenge"` row — one request, one event. A track() row queued while the
+      // response was open still needs this finish flush (serverless).
+      if (req.camadaChallenged) { if (this.env?.serverless) this.flushFor(req); return; }
+      const ev = this.buildEvent(req, path, query, ip, o);
+      ev.ts = o.t0;   // the request start: the timeline draws [ts, ts + dur]
+      ev.st = res.statusCode;
+      ev.dur = Date.now() - o.t0;
+      if (req.route?.path) ev.rt = String(req.route.path);
+      if (o.wrn) ev.wrn = o.wrn;   // §D3: the warn rule that let this request through
+      if (req.camadaSignalled) ev.chs = 1;   // challenge signalled (camada-all-82ar)
+      this.enqueue(ev, req);
+    }, undefined);
+    res.once('finish', ship);
+    res.once('close', ship);
   }
 
   private buildEvent(req: CamadaRequest, path: string, query: string, ip: string | null, o: { rid: string; sid: string | null; newSession: boolean }): WireEvent {
@@ -473,7 +469,7 @@ export class Camada {
         // Not a page: the app renders, flagged. Its normal event ships with chs: 1.
         r.camadaSignalled = true;
         res.setHeader('x-camada-challenge', '1');
-        if (!r.camadaHooked) {
+        if (r.camadaOpen === undefined) {
           this.hookCapture(r, res, path, query, ip, { rid: r.camada?.rid ?? randomUUID(), sid: r.camada?.sid ?? this.sessionOf(r), newSession: false, t0: Date.now() });
         }
         return false;
