@@ -3,6 +3,7 @@
 // the cookie lets the next request through.
 import { describe, it, expect, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
+import http2 from 'node:http2';
 import { CHALLENGE_COOKIE } from '@camada/core';
 import type { Camada } from '../src/index.js';
 import {
@@ -67,18 +68,56 @@ describe('serving the challenge', () => {
     expect(events(a).at(-1)).toMatchObject({ st: 403, blk: 'challenge', p: '/cart', tap: 'sdk-node' });
   });
 
-  it('answers 403 JSON for a non-HTML request', async () => {
-    const { app } = await v4App();
+  it('passes a JSON request to the app with the header, x-rid and a chs: 1 event', async () => {
+    const { a, engine, app } = await v4App();
     const r = await fetch(`${app.url}/checkout`, { headers: { accept: 'application/json', 'x-forwarded-for': CHALLENGED_IP } });
-    expect(r.status).toBe(403);
-    expect(r.headers.get('content-type')).toContain('application/json');
-    expect(await r.json()).toEqual({ error: 'challenge_required' });
+    expect(r.status).toBe(200);
+    expect(await r.text()).toContain('app');
+    expect(r.headers.get('x-camada-challenge')).toBe('1');
+    expect(r.headers.get('x-rid')).toBeTruthy();
+    await settle();
+    await engine.queue!.flush();
+    const ev = events(a).find((e) => e.p === '/checkout')!;
+    expect(ev).toMatchObject({ st: 200, chs: 1 });
+    expect(ev.blk).toBeUndefined();
   });
 
-  it('answers 403 JSON when sec-fetch-dest is not a document', async () => {
+  it('passes with the header when sec-fetch-dest is not a document', async () => {
     const { app } = await v4App();
     const r = await fetch(`${app.url}/checkout`, { headers: { accept: 'text/html', 'sec-fetch-dest': 'empty', 'x-forwarded-for': CHALLENGED_IP } });
-    expect(await r.json()).toEqual({ error: 'challenge_required' });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-camada-challenge')).toBe('1');
+  });
+
+  it('ships a signalled event even at sample 0 and on an excluded path', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    a.config = { ...a.config, sample: 0, exclude: ['/health'] };
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => { if (engine.handle(req, res)) return; res.writeHead(200).end('ok'); });
+    open.push(app, engine);
+    a.events.length = 0;
+    const h = { accept: 'application/json', 'x-forwarded-for': CHALLENGED_IP };
+    await fetch(`${app.url}/health`, { headers: h });
+    await fetch(`${app.url}/other`, { headers: h });
+    await fetch(`${app.url}/clean`, { headers: { accept: 'application/json', 'x-forwarded-for': ALLOWED_IP } });
+    await settle();
+    await engine.queue!.flush();
+    expect(events(a).filter((e) => e.chs === 1).map((e) => e.p).sort()).toEqual(['/health', '/other']);
+    expect(events(a).some((e) => e.p === '/clean')).toBe(false);
+  });
+
+  it('a valid _cch gets no header and no chs on a JSON request', async () => {
+    const { a, engine, app } = await v4App();
+    const cookie = (await pass(app)).headers.get('set-cookie')!.split(';')[0];
+    a.events.length = 0;
+    const r = await fetch(`${app.url}/checkout`, { headers: { accept: 'application/json', cookie, 'x-forwarded-for': CHALLENGED_IP } });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-camada-challenge')).toBeNull();
+    await settle();
+    await engine.queue!.flush();
+    expect(events(a).find((e) => e.p === '/checkout')!.chs).toBeUndefined();
   });
 
   it('challenges on a path rule, not just an ip', async () => {
@@ -257,6 +296,135 @@ describe('serveChallenge()', () => {
     // The response-finish hook must not add a second, reason-less row for the same request.
     expect(events(a).filter((e) => e.p === '/challenge-me')).toHaveLength(1);
     expect(events(a).at(-1)).toMatchObject({ st: 403, blk: 'challenge' });
+  });
+});
+
+describe('signalled cache-control (82ar)', () => {
+  const cc = 'public, max-age=300';
+  const ways: Record<string, (res: import('node:http').ServerResponse) => void> = {
+    '/set': (res) => { res.setHeader('cache-control', cc); res.writeHead(200); res.end('{}'); },
+    '/head': (res) => { res.writeHead(200, { 'Cache-Control': cc }).end('{}'); },
+    '/array': (res) => { res.writeHead(200, ['cache-control', cc]).end('{}'); },
+    '/tuple': (res) => { res.writeHead(200, [['Cache-Control', cc]]).end('{}'); },
+    '/remove': (res) => { res.removeHeader('cache-control'); res.end('{}'); },
+    '/removeset': (res) => { res.removeHeader('cache-control'); res.setHeader('cache-control', cc); res.end('{}'); },
+    '/append': (res) => { res.appendHeader('cache-control', cc); res.writeHead(200).end('{}'); },
+    '/implicit': (res) => { res.setHeader('cache-control', cc); res.end('{}'); },
+  };
+
+  it('ends no-store whichever way the app sets cache-control; an unsignalled response keeps its own', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      if (req.url === '/hook' && engine.serveChallenge(req, res)) return;
+      if (req.url === '/hook') { res.writeHead(200, { 'cache-control': cc }).end('{}'); return; }
+      ways[req.url!](res);
+    });
+    open.push(app, engine);
+    const get = (path: string, ip: string) => fetch(`${app.url}${path}`, { headers: { accept: 'application/json', 'x-forwarded-for': ip } });
+    for (const path of [...Object.keys(ways), '/hook']) {
+      const r = await get(path, CHALLENGED_IP);
+      expect([path, r.headers.get('x-camada-challenge'), r.headers.get('cache-control')]).toEqual([path, '1', 'no-store']);
+    }
+    expect((await get('/head', ALLOWED_IP)).headers.get('cache-control')).toBe(cc);
+  });
+
+  it('holds on an http2 compat server (writeHead applies headers past setHeader)', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const srv = http2.createServer((req, res) => {
+      if (engine.handle(req as never, res as never)) return;
+      if (req.url === '/head') res.writeHead(200, { 'cache-control': cc });
+      res.end('{}');
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    open.push(engine);
+    const client = http2.connect(`http://127.0.0.1:${(srv.address() as { port: number }).port}`);
+    try {
+      const get = (path: string, ip: string) => new Promise<http2.IncomingHttpHeaders>((resolve, reject) => {
+        const rq = client.request({ ':path': path, accept: 'application/json', 'x-forwarded-for': ip });
+        rq.on('response', resolve).on('error', reject).resume();
+      });
+      for (const path of ['/head', '/implicit']) {
+        const h = await get(path, CHALLENGED_IP);
+        expect([path, h['x-camada-challenge'], h['cache-control']]).toEqual([path, '1', 'no-store']);
+      }
+      expect((await get('/head', ALLOWED_IP))['cache-control']).toBe(cc);
+    } finally {
+      client.close();
+      srv.close();
+    }
+  });
+});
+
+describe('serveChallenge() on a non-HTML request', () => {
+  it('sets the header, stamps chs: 1 and returns false so the app answers', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    a.config = { ...a.config, sample: 0 };
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    let returned: boolean | null = null;
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      returned = engine.serveChallenge(req, res);
+      if (returned) return;
+      res.writeHead(200).end('{"ok":true}');
+    });
+    open.push(app, engine);
+    a.events.length = 0;
+    const r = await fetch(`${app.url}/challenge-me`, { headers: { accept: 'application/json', 'x-forwarded-for': '8.8.8.8' } });
+    expect(r.status).toBe(200);
+    expect(returned).toBe(false);
+    expect(r.headers.get('x-camada-challenge')).toBe('1');
+    await settle();
+    await engine.queue!.flush();
+    expect(events(a).filter((e) => e.p === '/challenge-me')).toEqual([expect.objectContaining({ st: 200, chs: 1 })]);
+  });
+
+  it('reuses handle()\'s rid and new-session flag when handle() sampled the request out', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    a.config = { ...a.config, sample: 0 };
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      if (engine.serveChallenge(req, res)) return;
+      res.writeHead(200).end('{"ok":true}');
+    });
+    open.push(app, engine);
+    a.events.length = 0;
+    const r = await fetch(`${app.url}/challenge-me`, { headers: { accept: 'application/json', 'x-forwarded-for': '8.8.8.8' } });
+    await settle();
+    await engine.queue!.flush();
+    const ev = events(a).filter((e) => e.p === '/challenge-me');
+    expect(ev).toEqual([expect.objectContaining({ chs: 1, ns: 1, rid: r.headers.get('x-rid') })]);
+  });
+
+  it('mints x-rid itself when handle() did not run', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.serveChallenge(req, res)) return;
+      res.writeHead(200).end('{"ok":true}');
+    });
+    open.push(app, engine);
+    a.events.length = 0;
+    const r = await fetch(`${app.url}/challenge-me`, { headers: { accept: 'application/json', 'x-forwarded-for': '8.8.8.8' } });
+    expect(r.headers.get('x-camada-challenge')).toBe('1');
+    const rid = r.headers.get('x-rid');
+    expect(rid).toBeTruthy();
+    await settle();
+    await engine.queue!.flush();
+    expect(events(a).filter((e) => e.p === '/challenge-me')).toEqual([expect.objectContaining({ chs: 1, rid })]);
   });
 });
 

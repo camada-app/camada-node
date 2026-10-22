@@ -89,7 +89,7 @@ carries one of four actions:
 |---|---|---|
 | `skip` | passes the request | nothing |
 | `block` | `403` before your app | `blk: "rule"`, `rl: "<rule id>"` |
-| `challenge` | serves the proof-of-work page (`challenge: false` opts out) | `blk: "challenge"` |
+| `challenge` | serves the proof-of-work page to page loads (`challenge: false` opts out). A non-HTML request (fetch/XHR/API) is not challenged: it reaches your app with `x-camada-challenge: 1` on the response | page: `blk: "challenge"`; non-HTML: its normal event plus `chs: 1` (never sampled out or excluded) |
 | `warn` | passes the request and marks it for the analyst | `wrn: "<rule id>"` |
 
 A skip rule also carries a *record matches* flag, which only the analyst reads: a recorded skip
