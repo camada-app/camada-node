@@ -276,6 +276,22 @@ describe('first-party beacon', () => {
     expect(rows[0]).toMatchObject({ sig: 1, rid: 'abc', tz: 'UTC', ip: '9.9.9.9', tap: 'sdk-node' });
   });
 
+  it('strips request-row keys (tlsx, blk, st, ...) a visitor puts in the beacon body', async () => {
+    const a = fakeAnalyst();
+    const engine = engineWith(a);
+    await loaded(engine);
+    const app = await appWith(engine);
+    const body = { rid: 'abc', tz: 'UTC', tlsx: 't13d_forged', ja4: 'j', asn: 1, cc: 'US', sid: 's', st: 200, blk: 'rule', wrn: 'r' };
+    const fp = await fetch(`${app.url}/_cam/fp`, { method: 'POST', body: JSON.stringify(body) });
+    expect(fp.status).toBe(204);
+    await settle();
+    await engine.queue!.flush();
+    const rows = a.events.flat() as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ sig: 1, rid: 'abc', tz: 'UTC', tap: 'sdk-node' });
+    for (const k of ['tlsx', 'ja4', 'asn', 'cc', 'sid', 'st', 'blk', 'wrn']) expect(rows[0]).not.toHaveProperty(k);
+  });
+
   it('drops an unparseable beacon body instead of shipping it', async () => {
     const a = fakeAnalyst();
     const engine = engineWith(a);

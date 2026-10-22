@@ -22,6 +22,9 @@ const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns co
 const SCRIPT_PATH = '/_cam/b.js';
 const FP_PATH = '/_cam/fp';
 const FP_MAX = 32 * 1024;   // matches the server's /fp cap: never accept what ingest will 413
+// Request-row keys only the SDK can attest (TLS/network facts, outcome, session). A beacon body is the
+// visitor's, so these never ride a sig:1 row; the analyst joins them from the beacon's request row.
+const REQUEST_ROW_KEYS = ['tlsx', 'ja4', 'asn', 'cc', 'sid', 'ns', 'st', 'dur', 'rt', 'blk', 'rl', 'wrn', 'chs'];
 /** True for a peer address that is loopback (127.0.0.0/8, ::1, ::ffff:127.x) or not an IP at all. Node
  *  normalises req.socket.remoteAddress (dotted v4, compressed lower-case v6), and the peer is not
  *  attacker-spelled, so a prefix check on that string is enough; this is not a general IP parser. */
@@ -408,7 +411,9 @@ export class Camada {
       res.writeHead(204, { 'cache-control': 'no-store' });
       res.end();
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Buffer.isBuffer(parsed)) return;
-      this.enqueue({ ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE });
+      const row: Record<string, unknown> = { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE };
+      for (const k of REQUEST_ROW_KEYS) delete row[k];
+      this.enqueue(row);
     };
     const fromText = (text: string) => { try { return JSON.parse(text) as unknown; } catch { return null; } };
     if (req.readableEnded) {
