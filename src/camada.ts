@@ -223,9 +223,9 @@ export class Camada {
    *  in `cidrs` mode and only when the socket peer itself is a NON-loopback address core's cidrs walk
    *  trusts, i.e. Cloudflare connects to the app directly. A loopback peer (a local reverse proxy or
    *  cloudflared) is never trusted and X-Forwarded-For is never consulted, so the header is not read
-   *  and tlsx conditions fail open. Trust is core's isTrustedPeer, the same
-   *  first-hop test the cidrs walk uses. No readable peer (unix listener included) -> null, since
-   *  core's no-peer walk would trust everyone. */
+   *  and tlsx conditions fail open. Trust is core's isTrustedPeer, the same first-hop test the cidrs
+   *  walk uses. No readable peer (unix listener included) -> null, since core's no-peer walk would
+   *  trust everyone. */
   private tlsxOf(req: IncomingMessage): string | null {
     const header = this.tlsxHeader;
     if (!header) return null;
@@ -233,8 +233,7 @@ export class Camada {
     if (v == null || v.length > 128 || !TLSX_RE.test(v)) return null;
     const cfg = this.trustedProxy();
     const peer = req.socket?.remoteAddress;
-    if (cfg?.mode !== 'cidrs' || !peer) return null;
-    if (isLoopbackPeer(peer)) return null;
+    if (!peer || isLoopbackPeer(peer)) return null;
     return isTrustedPeer(peer, cfg) ? v : null;
   }
 
