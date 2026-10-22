@@ -151,22 +151,21 @@ untouched. The value feeds the same matcher as `@camada/hono`'s `request.cf.tlsC
 the snapshot's `tls` entries block with `x-block-reason: tls`, and `tlsx is` / `is_in` rule
 conditions apply.
 
-The header is believed only when Cloudflare is a trusted proxy, because anyone else can write it:
+This needs Cloudflare to connect to the app directly. The header is believed only in `cidrs` mode,
+when the socket peer is a non-loopback address inside Cloudflare's ranges, because anyone else can
+write it:
 
 ```
 CAMADA_TRUSTED_PROXY=cidrs:173.245.48.0/20,103.21.244.0/22,…   # Cloudflare's published ranges
 CAMADA_TLSX_HEADER=x-camada-tlsx
 ```
 
-It is read only in `cidrs` mode, when the socket peer is inside those ranges. Behind a proxy on
-the same host (nginx or Caddy on loopback) the peer always looks trusted, so camada instead
-requires the rightmost non-loopback `X-Forwarded-For` hop to be inside the ranges; with none, or an
-untrusted one, the header is ignored. Keep that local proxy unreachable except through
-Cloudflare (firewall to Cloudflare's ranges, or authenticated origin pulls). In `none`, `hops` or
-`vercel` mode, from any other peer, on a socket with no readable peer (unix listeners included),
-or with a malformed value (over 128 characters, outside `[A-Za-z0-9+/=_-]`, or a repeated header),
-it is ignored and `tlsx` conditions fail open. The fingerprint is not sent to camada: events carry
-no `tlsx`.
+Behind a local reverse proxy (nginx or Caddy on loopback) or a cloudflared tunnel the peer is
+loopback, so the header is not read and `tlsx` conditions fail open; `X-Forwarded-For` is never
+consulted. The same holds in `none`, `hops` or `vercel` mode, from any other peer, with no readable
+peer (unix listeners included), or with a malformed value (over 128 characters, outside
+`[A-Za-z0-9+/=_-]`, or a repeated header). The Transform Rule must set the header on every request.
+The fingerprint is not sent to camada: events carry no `tlsx`.
 
 ## WebSockets
 
