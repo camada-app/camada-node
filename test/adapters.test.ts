@@ -129,6 +129,9 @@ async function expectRealPaths(base: string, a: FakeAnalyst, engine: { queue: { 
     const ch = await fetch(`${base}/admin/users`, { headers: html });
     expect(ch.status).toBe(403);
     expect(ch.headers.get('x-camada-challenge')).toBe('1');
+    const api = await fetch(`${base}/admin/users`, { headers: { accept: 'application/json' } });   // 82ar: not a page, passes flagged
+    expect(api.status).toBe(200);
+    expect(api.headers.get('x-camada-challenge')).toBe('1');
     const js = await fetch(`${base}/_cam/b.js`);
     expect(js.status).toBe(200);
     expect(js.headers.get('content-type')).toContain('javascript');
