@@ -13,7 +13,7 @@ import {
 import iife from '@camada/browser/iife-string';
 import { resolveEnv, type ResolvedEnv } from './env.js';
 import {
-  CHALLENGE_PATH, nodeChallengeKit, readForm, parsedBody, isHttps, writeChallengePage, writeChallengeJson,
+  CHALLENGE_PATH, nodeChallengeKit, readForm, parsedBody, isHttps, writeChallengePage,
 } from './challenge.js';
 import { SDK_ID } from './version.js';
 
@@ -40,9 +40,10 @@ export interface CamadaOptions {
 interface CamadaRequest extends IncomingMessage {
   originalUrl?: string;          // Express/Nest: the full URL; `url` loses the mount path inside app.use('/x', …)
   body?: unknown;                // what a body parser mounted before camada left behind
-  camada?: { rid: string; ip: string | null; sid: string };
+  camada?: { rid: string; ip: string | null; sid: string; ns: boolean; t0: number; wrn?: string };   // ns: first visit (no session cookie came in); t0: request start
   route?: { path?: string };     // Express fills this after routing
   camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
+  camadaSignalled?: boolean;     // a non-HTML request passed under a challenge: x-camada-challenge header + `chs: 1` on its event
   camadaOpen?: boolean;          // its event ships on response finish: a track() row until then rides that flush
   camadaTracks?: Promise<void>[];   // track() rows still hashing (serverless: the finish flush waits for them)
   camadaPrefix?: string;         // the mount prefix seen when camada ran (scriptTag() runs later, where req.url is whole again)
@@ -60,6 +61,9 @@ const splitUrl = (raw: string): { path: string; query: string } => {
   const qi = raw.indexOf('?');
   return qi === -1 ? { path: raw, query: '' } : { path: raw.slice(0, qi), query: raw.slice(qi) };
 };
+
+const isPage = (req: IncomingMessage): boolean =>
+  wantsHtml((req.headers.accept as string) ?? null, (req.headers['sec-fetch-dest'] as string) ?? null);
 
 /** Path and query as the client sent them: what rules, the challenge list and events see. Express
  *  strips the mount path from `req.url` inside `app.use(path, mw)` (Nest mounts module middleware
@@ -117,6 +121,32 @@ function keepSessionCookie(res: ServerResponse, cookie: string): void {
     return set.call(this, name, value);
   } as ServerResponse['setHeader'];
   res.setHeader('set-cookie', cookie);
+}
+
+/** Marks a signalled response: `x-camada-challenge: 1` and `cache-control: no-store`. The header is
+ *  per client, so no shared cache may keep the copy, whatever the app sets. Every flush (an explicit
+ *  writeHead, http1's `_implicitHeader`, http2 compat's end/write/flushHeaders) goes through
+ *  `this.writeHead`, so that is the one choke point: it drops any cache-control from the headers it is
+ *  given (object, flat array, tuple array) and re-sets no-store with the original setHeader. */
+function signal(res: ServerResponse): void {
+  const set = res.setHeader, writeHead = res.writeHead;
+  const isCc = (n: unknown) => typeof n === 'string' && n.toLowerCase() === 'cache-control';
+  const strip = (h: unknown): unknown => {
+    if (Array.isArray(h)) {
+      if (h.length && Array.isArray(h[0])) return h.filter((p) => !isCc(p[0]));
+      const out: unknown[] = [];
+      for (let i = 0; i < h.length; i += 2) if (!isCc(h[i])) out.push(h[i], h[i + 1]);
+      return out;
+    }
+    if (h && typeof h === 'object') return Object.fromEntries(Object.entries(h).filter(([k]) => !isCc(k)));
+    return h;
+  };
+  res.writeHead = function (this: ServerResponse, status: number, ...rest: unknown[]) {
+    if (!this.headersSent) set.call(this, 'cache-control', 'no-store');
+    return (writeHead as (...a: unknown[]) => ServerResponse).call(this, status, ...rest.map(strip));
+  } as ServerResponse['writeHead'];
+  res.setHeader('x-camada-challenge', '1');
+  res.setHeader('cache-control', 'no-store');
 }
 
 export class Camada {
@@ -248,7 +278,11 @@ export class Camada {
     if (this.challengeOn && this.kit && ip) {
       // The verify endpoint answers first: a challenged client must be able to reach it.
       if (req.method === 'POST' && atEndpoint(req, path, this.challengePath)) { this.verifyChallenge(req, res, ip); return true; }
-      if (v.challenge && !this.challengePassed(req, ip)) { this.serveChallengeInner(req, res, ip, path + query); return true; }
+      if (v.challenge && !this.challengePassed(req, ip)) {
+        // A page load gets the challenge; anything else (fetch/XHR/API) passes to the app, flagged.
+        if (isPage(req)) { this.serveChallengeInner(req, res, ip, path + query); return true; }
+        req.camadaSignalled = true;
+      }
     }
 
     if (this.beaconEnabled()) {
@@ -263,45 +297,60 @@ export class Camada {
       }
     }
 
+    const { rid, sid, ns: newSession } = this.begin(req, res, ip, t0, v.warn ? v.rule : undefined);
+    if (req.camadaSignalled) signal(res);
+
+    const cfg = this.snap.config;
+    const excluded = (cfg?.exclude || []).some((x) => path.startsWith(x));
+    // A signalled request ships regardless of sample and exclude, like the 403 row it replaces.
+    if (req.camadaSignalled || (!excluded && Math.random() < (cfg?.sample ?? 1))) {
+      this.hookCapture(req, res, path, query, ip, { rid, sid, newSession, t0 });
+    }
+    return false;
+  }
+
+  /** Mints the request's rid and session (setting the cookie on a first visit), records them on
+   *  `req.camada` and sets `x-rid`. handle() and serveChallenge() (when handle() did not run) share it. */
+  private begin(req: CamadaRequest, res: ServerResponse, ip: string | null, t0: number, wrn?: string): NonNullable<CamadaRequest['camada']> {
     const rid = randomUUID();
     let sid = cookieValue((req.headers.cookie as string) || '', SESSION_COOKIE);
-    const newSession = !sid;
+    const ns = !sid;
     if (!sid) {
       sid = randomUUID();
       const https = (req.socket as { encrypted?: boolean }).encrypted || req.headers['x-forwarded-proto'] === 'https';
       keepSessionCookie(res, `${SESSION_COOKIE}=${sid}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
     }
-    req.camada = { rid, ip, sid };
     res.setHeader('x-rid', rid);
+    return (req.camada = { rid, ip, sid, ns, t0, wrn });
+  }
 
-    const cfg = this.snap.config;
-    const excluded = (cfg?.exclude || []).some((x) => path.startsWith(x));
-    if (!excluded && Math.random() < (cfg?.sample ?? 1)) {
-      // 'finish' when the response went out whole; 'close' alone when the client left first (an
-      // aborted SSE or download), which ships the status set so far and dur up to the abort — the
-      // fetch adapters' cancel semantics. 'close' also follows every 'finish': one event either way.
-      let shipped = false;
-      req.camadaOpen = true;
-      const ship = () => guarded(() => {
-        req.camadaOpen = false;
-        if (shipped) return;
-        shipped = true;
-        // serveChallenge() may have answered from inside the app, and it already shipped the
-        // `blk: "challenge"` row — one request, one event. A track() row queued while the
-        // response was open still needs this finish flush (serverless).
-        if (req.camadaChallenged) { if (this.env?.serverless) this.flushFor(req); return; }
-        const ev = this.buildEvent(req, path, query, ip, { rid, sid, newSession });
-        ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
-        ev.st = res.statusCode;
-        ev.dur = Date.now() - t0;
-        if (req.route?.path) ev.rt = String(req.route.path);
-        if (v.warn && v.rule) ev.wrn = v.rule;   // §D3: the warn rule that let this request through
-        this.enqueue(ev, req);
-      }, undefined);
-      res.once('finish', ship);
-      res.once('close', ship);
-    }
-    return false;
+  /** Installs the response-finish hook that ships the request's normal capture event. */
+  private hookCapture(req: CamadaRequest, res: ServerResponse, path: string, query: string, ip: string | null,
+    o: { rid: string; sid: string | null; newSession: boolean; t0: number }): void {
+    // 'finish' when the response went out whole; 'close' alone when the client left first (an
+    // aborted SSE or download), which ships the status set so far and dur up to the abort — the
+    // fetch adapters' cancel semantics. 'close' also follows every 'finish': one event either way.
+    let shipped = false;
+    req.camadaOpen = true;
+    const ship = () => guarded(() => {
+      req.camadaOpen = false;
+      if (shipped) return;
+      shipped = true;
+      // serveChallenge() may have answered from inside the app, and it already shipped the
+      // `blk: "challenge"` row — one request, one event. A track() row queued while the
+      // response was open still needs this finish flush (serverless).
+      if (req.camadaChallenged) { if (this.env?.serverless) this.flushFor(req); return; }
+      const ev = this.buildEvent(req, path, query, ip, o);
+      ev.ts = o.t0;   // the request start: the timeline draws [ts, ts + dur]
+      ev.st = res.statusCode;
+      ev.dur = Date.now() - o.t0;
+      if (req.route?.path) ev.rt = String(req.route.path);
+      if (req.camada?.wrn) ev.wrn = req.camada.wrn;   // §D3: the warn rule that let this request through
+      if (req.camadaSignalled) ev.chs = 1;   // challenge signalled (camada-all-82ar)
+      this.enqueue(ev, req);
+    }, undefined);
+    res.once('finish', ship);
+    res.once('close', ship);
   }
 
   private buildEvent(req: CamadaRequest, path: string, query: string, ip: string | null, o: { rid: string; sid: string | null; newSession: boolean }): WireEvent {
@@ -351,15 +400,11 @@ export class Camada {
     return !!this.kit?.tokenValid(ip, Date.now(), cookieValue((req.headers.cookie as string) || '', CHALLENGE_COOKIE));
   }
 
-  /** 403 + the proof-of-work page (HTML navigations) or 403 JSON (everything else), plus the
+  /** 403 + the proof-of-work page (HTML navigations only), plus the
    *  `blk: "challenge"` event — a served challenge is reported like a block (contract §D2). */
   private serveChallengeInner(req: CamadaRequest, res: ServerResponse, ip: string, target: string): void {
     const to = safeReturnTo(target);
-    if (wantsHtml((req.headers.accept as string) ?? null, (req.headers['sec-fetch-dest'] as string) ?? null)) {
-      writeChallengePage(res, { nonce: this.kit!.nonce(ip, Date.now()), action: this.challengeAction(req), to });
-    } else {
-      writeChallengeJson(res);
-    }
+    writeChallengePage(res, { nonce: this.kit!.nonce(ip, Date.now()), action: this.challengeAction(req), to });
     // The response is out; telemetry must never be able to undo that (a throw here would make
     // guarded() report the request as unhandled and let the app write to an ended response).
     guarded(() => {
@@ -443,14 +488,26 @@ export class Camada {
 
   /** Serve the challenge for this request on demand — for a route the app wants to gate itself
    *  (the example's /challenge-me). Returns false when the client already holds a valid `_cch`,
-   *  so the caller renders its own page. */
+   *  so the caller renders its own page. A non-HTML request is never challenged: it gets the
+   *  `x-camada-challenge: 1` header and a `chs: 1` event, and false, so the app answers. */
   serveChallenge(req: IncomingMessage, res: ServerResponse): boolean {
     return guarded(() => {
       if (this.disabled || !this.kit || !this.queue) return false;
       const ip = this.clientIp(req);
       if (!ip || this.challengePassed(req, ip)) return false;   // unidentifiable client: fail open
-      (req as CamadaRequest).camadaChallenged = true;
-      const { path, query } = pathAndQuery(req as CamadaRequest);
+      const r = req as CamadaRequest;
+      const { path, query } = pathAndQuery(r);
+      if (!isPage(r)) {
+        // Not a page: the app renders, flagged. Its normal event ships with chs: 1.
+        if (!r.camadaSignalled) signal(res);   // handle() may have done it already
+        r.camadaSignalled = true;
+        if (r.camadaOpen === undefined) {
+          const c = r.camada ?? this.begin(r, res, ip, Date.now());   // handle() ran (sampled out): its ids; else mint them as it would
+          this.hookCapture(r, res, path, query, ip, { rid: c.rid, sid: c.sid, newSession: c.ns, t0: c.t0 });
+        }
+        return false;
+      }
+      r.camadaChallenged = true;
       this.serveChallengeInner(req as CamadaRequest, res, ip, path + query);
       return true;
     }, false);
