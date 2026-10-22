@@ -134,30 +134,33 @@ function keepSessionCookie(res: ServerResponse, cookie: string): void {
   res.setHeader('set-cookie', cookie);
 }
 
-/** Marks a signalled response: `x-camada-challenge: 1` and `cache-control: no-store`. The header is
+// CDNs read their own cache header ahead of cache-control, so all of these end up no-store.
+const NO_STORE_HEADERS = ['cache-control', 'cdn-cache-control', 'surrogate-control', 'cloudflare-cdn-cache-control', 'vercel-cdn-cache-control', 'netlify-cdn-cache-control'];
+
+/** Marks a signalled response: `x-camada-challenge: 1` and no-store on every NO_STORE_HEADERS name. The header is
  *  per client, so no shared cache may keep the copy, whatever the app sets. Every flush (an explicit
  *  writeHead, http1's `_implicitHeader`, http2 compat's end/write/flushHeaders) goes through
- *  `this.writeHead`, so that is the one choke point: it drops any cache-control from the headers it is
+ *  `this.writeHead`, so that is the one choke point: it drops those names from the headers it is
  *  given (object, flat array, tuple array) and re-sets no-store with the original setHeader. */
 function signal(res: ServerResponse): void {
   const set = res.setHeader, writeHead = res.writeHead;
-  const isCc = (n: unknown) => typeof n === 'string' && n.toLowerCase() === 'cache-control';
+  const isNoStore = (n: unknown) => typeof n === 'string' && NO_STORE_HEADERS.includes(n.toLowerCase());
   const strip = (h: unknown): unknown => {
     if (Array.isArray(h)) {
-      if (h.length && Array.isArray(h[0])) return h.filter((p) => !isCc(p[0]));
+      if (h.length && Array.isArray(h[0])) return h.filter((p) => !isNoStore(p[0]));
       const out: unknown[] = [];
-      for (let i = 0; i < h.length; i += 2) if (!isCc(h[i])) out.push(h[i], h[i + 1]);
+      for (let i = 0; i < h.length; i += 2) if (!isNoStore(h[i])) out.push(h[i], h[i + 1]);
       return out;
     }
-    if (h && typeof h === 'object') return Object.fromEntries(Object.entries(h).filter(([k]) => !isCc(k)));
+    if (h && typeof h === 'object') return Object.fromEntries(Object.entries(h).filter(([k]) => !isNoStore(k)));
     return h;
   };
   res.writeHead = function (this: ServerResponse, status: number, ...rest: unknown[]) {
-    if (!this.headersSent) set.call(this, 'cache-control', 'no-store');
+    if (!this.headersSent) for (const h of NO_STORE_HEADERS) set.call(this, h, 'no-store');
     return (writeHead as (...a: unknown[]) => ServerResponse).call(this, status, ...rest.map(strip));
   } as ServerResponse['writeHead'];
   res.setHeader('x-camada-challenge', '1');
-  res.setHeader('cache-control', 'no-store');
+  for (const h of NO_STORE_HEADERS) res.setHeader(h, 'no-store');
 }
 
 export class Camada {
