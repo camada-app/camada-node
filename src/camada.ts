@@ -22,9 +22,9 @@ const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns co
 const SCRIPT_PATH = '/_cam/b.js';
 const FP_PATH = '/_cam/fp';
 const FP_MAX = 32 * 1024;   // matches the server's /fp cap: never accept what ingest will 413
-// Request-row keys only the SDK can attest (TLS/network facts, outcome, session). A beacon body is the
+// Row keys only the SDK can attest (TLS/network facts, outcome, session, track()). A beacon body is the
 // visitor's, so these never ride a sig:1 row; the analyst joins them from the beacon's request row.
-const REQUEST_ROW_KEYS = ['tlsx', 'ja4', 'asn', 'cc', 'sid', 'ns', 'st', 'dur', 'rt', 'blk', 'rl', 'wrn', 'chs'];
+const REQUEST_ROW_KEYS = ['tlsx', 'ja4', 'asn', 'cc', 'sid', 'ns', 'st', 'dur', 'rt', 'blk', 'rl', 'wrn', 'chs', 'ch', 'et', 'uid'];
 /** True for a peer address that is loopback (127.0.0.0/8, ::1, ::ffff:127.x) or not an IP at all. Node
  *  normalises req.socket.remoteAddress (dotted v4, compressed lower-case v6), and the peer is not
  *  attacker-spelled, so a prefix check on that string is enough; this is not a general IP parser. */
