@@ -9,8 +9,10 @@
   only in `cidrs` trusted-proxy mode when the socket peer is a non-loopback address inside those
   ranges (Cloudflare connecting directly); a loopback peer never has it read, and `X-Forwarded-For`
   is not consulted. A malformed value, a repeated header or a missing peer is ignored. It feeds
-  core's matcher, so v3/v4 `tls` entries and v5 `tlsx` rule conditions match on node. Events still
-  carry no `tlsx`. (camada-all-8pn9)
+  core's matcher, so v3/v4 `tls` entries and v5 `tlsx` rule conditions match on node. Events carry
+  the same value as `tlsx` under the same trust gate (pass, block, challenge and 101 rows; never
+  `track()` rows or the beacon relay); a value that failed the gate is never shipped.
+  (camada-all-8pn9, camada-all-bcsf)
 
 ### Fixed
 
