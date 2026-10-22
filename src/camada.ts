@@ -392,10 +392,13 @@ export class Camada {
     const raw = req.rawHeaders || [];
     const headers: Array<[string, string]> = [];
     for (let i = 0; i + 1 < raw.length; i += 2) headers.push([raw[i], raw[i + 1]]);
-    return buildWireEvent(
+    const ev = buildWireEvent(
       { method: req.method || 'GET', host: (req.headers.host as string) || '', path, query, headers, ip, httpVersion: req.httpVersion },
       { tap: TAP_NODE, rid: o.rid, sid: o.sid, newSession: o.newSession },
     );
+    const tlsx = this.tlsxOf(req);   // same trusted-header gate as matching (camada-all-bcsf)
+    if (tlsx) ev.tlsx = tlsx;
+    return ev;
   }
 
   /** Reads the beacon POST (≤32 KB), answers 204 immediately, and queues the beacon as a `sig: 1`
