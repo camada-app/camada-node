@@ -169,7 +169,9 @@ loopback, so the header is not read and `tlsx` conditions fail open; `X-Forwarde
 consulted. The same holds in `none`, `hops` or `vercel` mode, from any other peer, with no readable
 peer (unix listeners included), or with a malformed value (over 128 characters, outside
 `[A-Za-z0-9+/=_-]`, or a repeated header). The Transform Rule must set the header on every request.
-The fingerprint is not sent to camada: events carry no `tlsx`.
+The same trusted value is sent to camada as `tlsx` on request events (pass, block, challenge and
+upgrade rows), never on `track()` rows or the beacon relay, and a value that failed the checks above
+is never sent. camada uses it for TLS-fingerprint rules.
 
 ## WebSockets
 
