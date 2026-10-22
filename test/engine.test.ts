@@ -281,7 +281,7 @@ describe('first-party beacon', () => {
     const engine = engineWith(a);
     await loaded(engine);
     const app = await appWith(engine);
-    const body = { rid: 'abc', tz: 'UTC', tlsx: 't13d_forged', ja4: 'j', asn: 1, cc: 'US', sid: 's', st: 200, blk: 'rule', wrn: 'r' };
+    const body = { rid: 'abc', tz: 'UTC', tlsx: 't13d_forged', ja4: 'j', asn: 1, cc: 'US', sid: 's', st: 200, blk: 'rule', wrn: 'r', ch: 1, et: 'login', uid: 'u' };
     const fp = await fetch(`${app.url}/_cam/fp`, { method: 'POST', body: JSON.stringify(body) });
     expect(fp.status).toBe(204);
     await settle();
@@ -289,7 +289,7 @@ describe('first-party beacon', () => {
     const rows = a.events.flat() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ sig: 1, rid: 'abc', tz: 'UTC', tap: 'sdk-node' });
-    for (const k of ['tlsx', 'ja4', 'asn', 'cc', 'sid', 'st', 'blk', 'wrn']) expect(rows[0]).not.toHaveProperty(k);
+    for (const k of ['tlsx', 'ja4', 'asn', 'cc', 'sid', 'st', 'blk', 'wrn', 'ch', 'et', 'uid']) expect(rows[0]).not.toHaveProperty(k);
   });
 
   it('drops an unparseable beacon body instead of shipping it', async () => {
