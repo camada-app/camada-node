@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `CAMADA_TLSX_HEADER` (option `tlsxHeader`): an opt-in header carrying the TLS fingerprint, e.g. a
+  Cloudflare Transform Rule setting `x-camada-tlsx` to `cf.tls_client_extensions_sha1`. It is read
+  only in `cidrs` trusted-proxy mode when the socket peer is a non-loopback address inside those
+  ranges (Cloudflare connecting directly); a loopback peer never has it read, and `X-Forwarded-For`
+  is not consulted. A malformed value, a repeated header or a missing peer is ignored. It feeds
+  core's matcher, so v3/v4 `tls` entries and v5 `tlsx` rule conditions match on node. Events still
+  carry no `tlsx`. (camada-all-8pn9)
+
 ## 0.3.2 (2026-10-12; follows 0.3.1)
 
 Needs `@camada/core` with `challengePageCsp` (0.5.2).

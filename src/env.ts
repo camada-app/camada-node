@@ -3,6 +3,7 @@
 //   CAMADA_INGEST_URL / CAMADA_SNAPSHOT_URL  (dev: http://localhost:8787[/snapshot])
 //   CAMADA_DISABLED=1                        kill switch, checked per request
 //   CAMADA_SERVERLESS=1                      lazy snapshot mode (no interval timer), flush per request
+//   CAMADA_TLSX_HEADER                       opt-in: header carrying the TLS fingerprint (trusted-proxy cidrs mode only)
 //   CAMADA_TRUSTED_PROXY                     local override: none | vercel | hops:N | cidrs:a,b
 import { parseKey, parseTrustedProxyEnv, type TrustedProxyConfig } from '@camada/core';
 
@@ -16,6 +17,13 @@ export interface ResolvedEnv {
   snapshotUrl: string;
   serverless: boolean;
   trustedProxy: TrustedProxyConfig | null;   // null = defer to server-delivered config
+  tlsxHeader: string | null;                 // lower-cased header name, null = tlsx never matches here
+}
+
+/** A usable header name (RFC 9110 token), lower-cased; anything else is "off". */
+export function parseTlsxHeader(raw: string | undefined | null): string | null {
+  const n = (raw ?? '').trim().toLowerCase();
+  return /^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(n) ? n : null;
 }
 
 /** Returns null (SDK stays disabled, one log line) rather than throwing on bad config. */
@@ -31,5 +39,6 @@ export function resolveEnv(env: Record<string, string | undefined> = process.env
     snapshotUrl: env.CAMADA_SNAPSHOT_URL || `${ingestUrl}/snapshot`,
     serverless: env.CAMADA_SERVERLESS === '1',
     trustedProxy: parseTrustedProxyEnv(env.CAMADA_TRUSTED_PROXY),
+    tlsxHeader: parseTlsxHeader(env.CAMADA_TLSX_HEADER),
   };
 }
