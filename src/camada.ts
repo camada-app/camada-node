@@ -233,7 +233,8 @@ export class Camada {
     if (v == null || v.length > 128 || !TLSX_RE.test(v)) return null;
     const cfg = this.trustedProxy();
     const peer = req.socket?.remoteAddress;
-    if (!peer || isLoopbackPeer(peer)) return null;
+    if (cfg?.mode !== 'cidrs' || !peer) return null;
+    if (isLoopbackPeer(peer)) return null;
     return isTrustedPeer(peer, cfg) ? v : null;
   }
 
