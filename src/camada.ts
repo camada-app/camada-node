@@ -23,15 +23,13 @@ const SCRIPT_PATH = '/_cam/b.js';
 const FP_PATH = '/_cam/fp';
 const FP_MAX = 32 * 1024;   // matches the server's /fp cap: never accept what ingest will 413
 const TLSX_PROBES = ['192.0.2.1', '198.51.100.1', '203.0.113.1'];   // RFC 5737 documentation addresses
-/** One XFF entry reduced to a bare address: trimmed, port and brackets dropped, v4-mapped form unmapped. */
-function cleanHop(e: string): string {
-  let h = e.trim();
-  const br = /^\[([^\]]*)\](?::\d+)?$/.exec(h);
-  if (br) h = br[1]; else if (/^[\d.]+:\d+$/.test(h)) h = h.slice(0, h.lastIndexOf(':'));
-  return h.replace(/^::ffff:(?=\d+\.)/i, '');
-}
-function isLoopbackIp(ip: string): boolean {
-  return ip === '::1' || /^0*:0*:0*:0*:0*:0*:0*:0*1$/.test(ip) || (isIP(ip) === 4 && ip.startsWith('127.'));
+/** True for a peer address that is loopback (127.0.0.0/8, ::1, ::ffff:127.x) or not an IP at all. Node
+ *  normalises req.socket.remoteAddress (dotted v4, compressed lower-case v6), and the peer is not
+ *  attacker-spelled, so a prefix check on that string is enough; this is not a general IP parser. */
+function isLoopbackPeer(peer: string): boolean {
+  const k = isIP(peer);
+  if (k === 4) return peer.startsWith('127.');
+  return k !== 6 || peer === '::1' || /^::ffff:127\./i.test(peer);
 }
 const TLSX_RE = /^[A-Za-z0-9+/=_-]+$/;
 const ATTACHED = Symbol.for('camada.attached');   // one wrap per server, however often attach() is called
@@ -224,15 +222,15 @@ export class Camada {
     return resolveClientIp(peer ?? null, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
   }
 
-  /** The TLS fingerprint a trusted proxy (Cloudflare Transform Rule) put in the opt-in header, or
-   *  null. Only trusted in `cidrs` mode and only when the socket peer is itself a trusted proxy:
-   *  anyone else could write the header. A peer is trusted exactly when core's XFF walk would
-   *  believe the entry the peer forwarded, so that is probed: the peer forwards a TEST-NET
-   *  address, and only a trusted peer gets it echoed back (an untrusted one resolves to itself).
-   *  A loopback peer (a proxy on this host) is trusted only through the first non-loopback X-Forwarded-For hop,
- *  which must itself pass the same probe. A probe equal to the hop is skipped, and a probe inside the trusted ranges echoes the peer
-   *  instead, so a second one is tried. No readable peer (unix listener included) -> null, since
-   *  core's no-peer walk would trust everyone. */
+  /** The TLS fingerprint Cloudflare (a Transform Rule) put in the opt-in header, or null. Trusted only
+   *  in `cidrs` mode and only when the socket peer itself is a NON-loopback address core's cidrs walk
+   *  trusts, i.e. Cloudflare connects to the app directly. A loopback peer (a local reverse proxy or
+   *  cloudflared) is never trusted and X-Forwarded-For is never consulted, so the header is not read
+   *  and tlsx conditions fail open. Trust is probed: the peer forwards a TEST-NET address, and only a
+   *  trusted peer gets it echoed back (an untrusted one resolves to itself). A probe equal to the peer
+   *  is skipped, and a probe inside the trusted ranges echoes the peer instead, so a second one is
+   *  tried. No readable peer (unix listener included) -> null, since core's no-peer walk would trust
+   *  everyone. */
   private tlsxOf(req: IncomingMessage): string | null {
     const header = this.tlsxHeader;
     if (!header) return null;
@@ -241,23 +239,14 @@ export class Camada {
     const cfg = this.trustedProxy();
     const peer = req.socket?.remoteAddress;
     if (cfg?.mode !== 'cidrs' || !peer) return null;
-    let hop = peer.replace(/^::ffff:(?=\d+\.)/i, '');
-    if (isLoopbackIp(hop)) {
-      // core trusts a loopback peer unconditionally, so a same-host proxy says nothing about who wrote the
-      // header. It was written by the first non-loopback hop in XFF (Cloudflare), which must itself be trusted.
-      const xff = req.headers['x-forwarded-for'];
-      const entries = (Array.isArray(xff) ? xff.join(',') : xff ?? '').split(',').map(cleanHop).filter(Boolean);
-      let next: string | undefined;
-      for (let i = entries.length - 1; i >= 0; i--) if (!isLoopbackIp(entries[i])) { next = entries[i]; break; }
-      if (!next || !isIP(next)) return null;
-      hop = next;
-    }
+    if (isLoopbackPeer(peer)) return null;
     if (cfg !== this.tlsxPeersCfg) { this.tlsxPeers.clear(); this.tlsxPeersCfg = cfg; }
-    let trusted = this.tlsxPeers.get(hop);   // keyed by the hop actually checked, never by a loopback peer
+    let trusted = this.tlsxPeers.get(peer);
     if (trusted === undefined) {
+      const hop = peer.replace(/^::ffff:(?=\d+\.)/i, '');
       trusted = TLSX_PROBES.some((probe) => !hop.endsWith(probe) && resolveClientIp(hop, probe, cfg) === probe);
       if (this.tlsxPeers.size >= 1024) this.tlsxPeers.clear();
-      this.tlsxPeers.set(hop, trusted);
+      this.tlsxPeers.set(peer, trusted);
     }
     return trusted ? v : null;
   }
