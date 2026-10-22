@@ -6,7 +6,7 @@
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId explicitly, so the hash never depends on which global the host exposes
 import {
-  SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, hashUserId, guarded, logRateLimited,
+  SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, isTrustedPeer, hashUserId, guarded, logRateLimited,
   challengeCookie, safeReturnTo, wantsHtml, CHALLENGE_COOKIE,
   TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
@@ -22,7 +22,6 @@ const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns co
 const SCRIPT_PATH = '/_cam/b.js';
 const FP_PATH = '/_cam/fp';
 const FP_MAX = 32 * 1024;   // matches the server's /fp cap: never accept what ingest will 413
-const TLSX_PROBES = ['192.0.2.1', '198.51.100.1', '203.0.113.1'];   // RFC 5737 documentation addresses
 /** True for a peer address that is loopback (127.0.0.0/8, ::1, ::ffff:127.x) or not an IP at all. Node
  *  normalises req.socket.remoteAddress (dotted v4, compressed lower-case v6), and the peer is not
  *  attacker-spelled, so a prefix check on that string is enough; this is not a general IP parser. */
@@ -175,8 +174,6 @@ export class Camada {
   private readonly kit: ChallengeKit | null = null;
   private readonly envSource: Record<string, string | undefined>;
   private readonly tlsxHeader: string | null;
-  private tlsxPeers = new Map<string, boolean>();   // peer -> is a trusted proxy, valid for tlsxPeersCfg only
-  private tlsxPeersCfg: TrustedProxyConfig | null = null;
   private readonly waitUntil?: (p: Promise<unknown>) => void;
 
   constructor(opts: CamadaOptions = {}) {
@@ -226,11 +223,9 @@ export class Camada {
    *  in `cidrs` mode and only when the socket peer itself is a NON-loopback address core's cidrs walk
    *  trusts, i.e. Cloudflare connects to the app directly. A loopback peer (a local reverse proxy or
    *  cloudflared) is never trusted and X-Forwarded-For is never consulted, so the header is not read
-   *  and tlsx conditions fail open. Trust is probed: the peer forwards a TEST-NET address, and only a
-   *  trusted peer gets it echoed back (an untrusted one resolves to itself). A probe equal to the peer
-   *  is skipped, and a probe inside the trusted ranges echoes the peer instead, so a second one is
-   *  tried. No readable peer (unix listener included) -> null, since core's no-peer walk would trust
-   *  everyone. */
+   *  and tlsx conditions fail open. Trust is core's isTrustedPeer, the same
+   *  first-hop test the cidrs walk uses. No readable peer (unix listener included) -> null, since
+   *  core's no-peer walk would trust everyone. */
   private tlsxOf(req: IncomingMessage): string | null {
     const header = this.tlsxHeader;
     if (!header) return null;
@@ -240,15 +235,7 @@ export class Camada {
     const peer = req.socket?.remoteAddress;
     if (cfg?.mode !== 'cidrs' || !peer) return null;
     if (isLoopbackPeer(peer)) return null;
-    if (cfg !== this.tlsxPeersCfg) { this.tlsxPeers.clear(); this.tlsxPeersCfg = cfg; }
-    let trusted = this.tlsxPeers.get(peer);
-    if (trusted === undefined) {
-      const hop = peer.replace(/^::ffff:(?=\d+\.)/i, '');
-      trusted = TLSX_PROBES.some((probe) => !hop.endsWith(probe) && resolveClientIp(hop, probe, cfg) === probe);
-      if (this.tlsxPeers.size >= 1024) this.tlsxPeers.clear();
-      this.tlsxPeers.set(peer, trusted);
-    }
-    return trusted ? v : null;
+    return isTrustedPeer(peer, cfg) ? v : null;
   }
 
   /** Where the challenge form posts: under the mount prefix, so it reaches camada, unless the
