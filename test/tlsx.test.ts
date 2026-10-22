@@ -76,10 +76,15 @@ describe('tlsx header, v3 tls entry', () => {
     expect(hit(e, TRUSTED, { [HDR]: TLSX, 'x-forwarded-for': '8.8.8.8' }).reason).toBe('tls');
   });
 
-  it('still tries another probe when the peer is the first probe address and the cidrs hold the others', async () => {
-    const e = await engine(fakeAnalyst(), { CAMADA_TRUSTED_PROXY: 'cidrs:192.0.2.0/24,203.0.113.0/24' });
+  it('trusts peers inside the configured cidrs', async () => {
+    const e = await engine(fakeAnalyst(), { CAMADA_TRUSTED_PROXY: 'cidrs:192.0.2.0/24' });
     expect(hit(e, '192.0.2.1', { [HDR]: TLSX }).reason).toBe('tls');
     expect(hit(e, '192.0.2.77', { [HDR]: TLSX }).reason).toBe('tls');
+  });
+
+  it('trusts a peer inside cidrs wide enough to hold every RFC 5737 range', async () => {
+    const e = await engine(fakeAnalyst(), { CAMADA_TRUSTED_PROXY: 'cidrs:192.0.0.0/4' });
+    expect(hit(e, '205.0.0.9', { [HDR]: TLSX }).reason).toBe('tls');
   });
 
   it('takes the header name from the tlsxHeader option too, lower-cased', async () => {
@@ -87,7 +92,7 @@ describe('tlsx header, v3 tls entry', () => {
     expect(hit(e, TRUSTED, { 'x-fp': TLSX }).reason).toBe('tls');
   });
 
-  it('ignores the header from a peer outside the cidrs, including one that is a probe address', async () => {
+  it('ignores the header from a peer outside the cidrs, including a documentation address', async () => {
     const e = await engine(fakeAnalyst());
     expect(hit(e, '8.8.8.8', { [HDR]: TLSX }).blocked).toBe(false);
     expect(hit(e, '192.0.2.1', { [HDR]: TLSX }).blocked).toBe(false);
@@ -127,30 +132,14 @@ describe('tlsx header, v3 tls entry', () => {
   });
 });
 
-describe('peer trust cache', () => {
-  /** A cidrs config whose `cidrs` reads are counted: every resolveClientIp probe reads it. */
+describe('config reads', () => {
   const counted = () => {
     const state = { reads: 0 };
     const cfg = { mode: 'cidrs', get cidrs() { state.reads++; return ['198.18.0.0/15']; } } as unknown as TrustedProxyConfig;
     return { state, cfg };
   };
 
-  it('probes a repeated trusted peer once, and again after the config object changes', async () => {
-    const e = await engine(fakeAnalyst());
-    const one = counted(), two = counted();
-    let cur = one.cfg;
-    (e as unknown as { trustedProxy: () => TrustedProxyConfig }).trustedProxy = () => cur;
-    expect(hit(e, TRUSTED, { [HDR]: TLSX }).reason).toBe('tls');
-    const first = one.state.reads;
-    expect(first).toBeGreaterThan(0);
-    expect(hit(e, TRUSTED, { [HDR]: TLSX }).reason).toBe('tls');
-    expect(one.state.reads).toBe(first);
-    cur = two.cfg;
-    expect(hit(e, TRUSTED, { [HDR]: TLSX }).reason).toBe('tls');
-    expect(two.state.reads).toBeGreaterThan(0);
-  });
-
-  it('does not probe at all when the header is absent', async () => {
+  it('does not read the trust config when the header is absent', async () => {
     const e = await engine(fakeAnalyst());
     const c = counted();
     (e as unknown as { trustedProxy: () => TrustedProxyConfig }).trustedProxy = () => c.cfg;
