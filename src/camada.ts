@@ -10,8 +10,9 @@ import {
   challengeCookie, safeReturnTo, wantsHtml, CHALLENGE_COOKIE,
   TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
+import { isIP } from 'node:net';
 import iife from '@camada/browser/iife-string';
-import { resolveEnv, type ResolvedEnv } from './env.js';
+import { resolveEnv, parseTlsxHeader, type ResolvedEnv } from './env.js';
 import {
   CHALLENGE_PATH, nodeChallengeKit, readForm, parsedBody, isHttps, writeChallengePage,
 } from './challenge.js';
@@ -21,6 +22,16 @@ const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns co
 const SCRIPT_PATH = '/_cam/b.js';
 const FP_PATH = '/_cam/fp';
 const FP_MAX = 32 * 1024;   // matches the server's /fp cap: never accept what ingest will 413
+const TLSX_PROBES = ['192.0.2.1', '198.51.100.1', '203.0.113.1'];   // RFC 5737 documentation addresses
+/** True for a peer address that is loopback (127.0.0.0/8, ::1, ::ffff:127.x) or not an IP at all. Node
+ *  normalises req.socket.remoteAddress (dotted v4, compressed lower-case v6), and the peer is not
+ *  attacker-spelled, so a prefix check on that string is enough; this is not a general IP parser. */
+function isLoopbackPeer(peer: string): boolean {
+  const k = isIP(peer);
+  if (k === 4) return peer.startsWith('127.');
+  return k !== 6 || peer === '::1' || /^::ffff:127\./i.test(peer);
+}
+const TLSX_RE = /^[A-Za-z0-9+/=_-]+$/;
 const ATTACHED = Symbol.for('camada.attached');   // one wrap per server, however often attach() is called
 
 export interface CamadaOptions {
@@ -30,6 +41,7 @@ export interface CamadaOptions {
   scriptPath?: string;
   fpPath?: string;
   challenge?: boolean;           // enforce `challenge` verdicts with the first-party page (default true; CAMADA_CHALLENGE=0 also switches it off)
+  tlsxHeader?: string;           // header carrying the TLS fingerprint (CAMADA_TLSX_HEADER); read only from a trusted-proxy peer in cidrs mode
   challengePath?: string;        // where that page posts its solution (default /__camada/challenge)
   snapshotVersion?: SnapshotVersion;   // 5 (default) also carries the tenant's ordered custom rules; 4 the allow/challenge sides only; 3 opts out of both
   /** With CAMADA_SERVERLESS=1: handed every per-request event flush and snapshot refresh, so the
@@ -162,6 +174,9 @@ export class Camada {
   private readonly scriptPathSet: boolean;
   private readonly kit: ChallengeKit | null = null;
   private readonly envSource: Record<string, string | undefined>;
+  private readonly tlsxHeader: string | null;
+  private tlsxPeers = new Map<string, boolean>();   // peer -> is a trusted proxy, valid for tlsxPeersCfg only
+  private tlsxPeersCfg: TrustedProxyConfig | null = null;
   private readonly waitUntil?: (p: Promise<unknown>) => void;
 
   constructor(opts: CamadaOptions = {}) {
@@ -175,6 +190,7 @@ export class Camada {
     this.challengePathSet = opts.challengePath != null;
     this.scriptPathSet = opts.scriptPath != null;
     this.env = resolveEnv(this.envSource);
+    this.tlsxHeader = parseTlsxHeader(opts.tlsxHeader) ?? this.env?.tlsxHeader ?? null;
     if (!this.env) return;                       // unconfigured: every entry point no-ops
     if (this.envSource.CAMADA_DISABLED === '1') return;   // killed at boot: no poll timer, no exit hooks, truly silent
     this.snap = new SnapshotClient({
@@ -204,6 +220,35 @@ export class Camada {
     const peer = req.socket?.remoteAddress;
     if (!peer && req.socket && !onUnixListener(req.socket)) return null;
     return resolveClientIp(peer ?? null, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+  }
+
+  /** The TLS fingerprint Cloudflare (a Transform Rule) put in the opt-in header, or null. Trusted only
+   *  in `cidrs` mode and only when the socket peer itself is a NON-loopback address core's cidrs walk
+   *  trusts, i.e. Cloudflare connects to the app directly. A loopback peer (a local reverse proxy or
+   *  cloudflared) is never trusted and X-Forwarded-For is never consulted, so the header is not read
+   *  and tlsx conditions fail open. Trust is probed: the peer forwards a TEST-NET address, and only a
+   *  trusted peer gets it echoed back (an untrusted one resolves to itself). A probe equal to the peer
+   *  is skipped, and a probe inside the trusted ranges echoes the peer instead, so a second one is
+   *  tried. No readable peer (unix listener included) -> null, since core's no-peer walk would trust
+   *  everyone. */
+  private tlsxOf(req: IncomingMessage): string | null {
+    const header = this.tlsxHeader;
+    if (!header) return null;
+    const v = headerReader(req)(header);   // a repeated header joins with ', ', which the charset rejects
+    if (v == null || v.length > 128 || !TLSX_RE.test(v)) return null;
+    const cfg = this.trustedProxy();
+    const peer = req.socket?.remoteAddress;
+    if (cfg?.mode !== 'cidrs' || !peer) return null;
+    if (isLoopbackPeer(peer)) return null;
+    if (cfg !== this.tlsxPeersCfg) { this.tlsxPeers.clear(); this.tlsxPeersCfg = cfg; }
+    let trusted = this.tlsxPeers.get(peer);
+    if (trusted === undefined) {
+      const hop = peer.replace(/^::ffff:(?=\d+\.)/i, '');
+      trusted = TLSX_PROBES.some((probe) => !hop.endsWith(probe) && resolveClientIp(hop, probe, cfg) === probe);
+      if (this.tlsxPeers.size >= 1024) this.tlsxPeers.clear();
+      this.tlsxPeers.set(peer, trusted);
+    }
+    return trusted ? v : null;
   }
 
   /** Where the challenge form posts: under the mount prefix, so it reaches camada, unless the
@@ -256,7 +301,7 @@ export class Camada {
     // enforce before anything else, beacon endpoints included — fail open while cold. The custom
     // rules read the user agent and the request headers (§D3); without them every `ua` and
     // `header` condition is false.
-    const v = this.snap.verdict({ ip, path, ua: req.headers['user-agent'], header: headerReader(req) });
+    const v = this.snap.verdict({ ip, path, ua: req.headers['user-agent'], header: headerReader(req), tlsx: this.tlsxOf(req) });
     if (v.block) {
       const headers: Record<string, string> = { 'x-block-reason': v.reason ?? '', 'x-block-version': v.version ?? '', 'content-type': 'text/plain', 'cache-control': 'no-store' };
       if (v.rule) headers['x-block-rule'] = v.rule;   // a custom rule blocked: name it, so the customer knows which row to edit

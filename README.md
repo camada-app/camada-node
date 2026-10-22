@@ -140,6 +140,37 @@ fire on your app's own truth instead of path heuristics:
 | `payment_failed` / `payment_succeeded` | a payment authorisation settled |
 | `coupon_failed` | a promo/voucher code was rejected |
 
+## TLS fingerprint behind Cloudflare
+
+Node has no TLS handshake to read, but Cloudflare does. Set `CAMADA_TLSX_HEADER=x-camada-tlsx`
+(or `createCamada({ tlsxHeader: 'x-camada-tlsx' })`) and add a Transform Rule that sets it:
+*Rules > Transform Rules > Modify Request Header*, "Set dynamic", header `x-camada-tlsx`, value
+`cf.tls_client_extensions_sha1`, on every request. The rule is required and must **set**
+(overwrite) the header: without it a client-sent `x-camada-tlsx` passes through Cloudflare
+untouched. The value feeds the same matcher as `@camada/hono`'s `request.cf.tlsClientExtensionsSha1`:
+the snapshot's `tls` entries block with `x-block-reason: tls`, and `tlsx is` / `is_in` rule
+conditions apply.
+
+This needs Cloudflare to connect to the app directly. The header is believed only in `cidrs` mode,
+when the socket peer is a non-loopback address inside Cloudflare's ranges, because anyone else can
+write it:
+
+```
+CAMADA_TRUSTED_PROXY=cidrs:173.245.48.0/20,103.21.244.0/22,…   # Cloudflare's published ranges
+CAMADA_TLSX_HEADER=x-camada-tlsx
+```
+
+Every range in `CAMADA_TRUSTED_PROXY=cidrs:…` is trusted to write the header, the same trust it gets
+for `X-Forwarded-For`, so list only Cloudflare's ranges there. A non-Cloudflare proxy range (a docker
+bridge, an internal load balancer) would let anyone who reaches that proxy set the fingerprint.
+
+Behind a local reverse proxy (nginx or Caddy on loopback) or a cloudflared tunnel the peer is
+loopback, so the header is not read and `tlsx` conditions fail open; `X-Forwarded-For` is never
+consulted. The same holds in `none`, `hops` or `vercel` mode, from any other peer, with no readable
+peer (unix listeners included), or with a malformed value (over 128 characters, outside
+`[A-Za-z0-9+/=_-]`, or a repeated header). The Transform Rule must set the header on every request.
+The fingerprint is not sent to camada: events carry no `tlsx`.
+
 ## WebSockets
 
 Node hands an upgrade request (a WebSocket handshake) to the server's `'upgrade'` listeners,
@@ -174,8 +205,10 @@ handshake your library then rejects still ships `st: 101`.
 - The challenge page sends its own `Content-Security-Policy` allowing only its inline script and
   style by `sha256` hash, and drops any `Content-Security-Policy(-Report-Only)` set before it.
 - Enforcement scope at this position: IP, path, user-agent and request-header conditions. ASN,
-  country and TLS-fingerprint conditions can't be evaluated in-app and fail open (a rule that
-  needs one never matches here; run `@camada/hono` on Cloudflare Workers for those).
+  country conditions can't be evaluated in-app and fail open (a rule that needs one never
+  matches here; run `@camada/hono` on Cloudflare Workers for those). TLS-fingerprint conditions
+  match only with the opt-in `CAMADA_TLSX_HEADER` (see "TLS fingerprint behind Cloudflare");
+  without it they fail open too.
 - `await camada.stop()` in your own graceful shutdown stops polling and the event queue. It
   returns a promise that settles once queued rows (a drain in flight, or rows held by an ingest
   429) are sent, or counted as dropped if the send fails; it never rejects.

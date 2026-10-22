@@ -36,6 +36,7 @@ export interface FakeAnalyst {
   ingestDown: boolean;
   v4: boolean;                  // serve the v4 golden container instead of v3
   v5: boolean;                  // serve the v5 golden container (custom rules); wins over v4
+  v5Meta?: string;              // replaces the golden v5 meta (same bin) when set
   snapshotVersions: string[];   // x-camada-snapshot seen on /snapshot
 }
 
@@ -52,7 +53,7 @@ export function fakeAnalyst(): FakeAnalyst {
         // 200 body frame: [u32 LE meta-length][meta JSON][BLK bin]. Which container a tenant
         // has is the server's business: a v5 asker is answered with v4 or v3 when that is all
         // this tenant published, exactly as §D3 says.
-        const meta = a.v5 ? V5_META : a.v4 ? V4_META : META;
+        const meta = a.v5 ? (a.v5Meta ?? V5_META) : a.v4 ? V4_META : META;
         const body = a.v5 ? V5_BIN : a.v4 ? V4_BIN : BIN;
         const m = new TextEncoder().encode(meta);
         const f = new Uint8Array(4 + m.length + body.length);
