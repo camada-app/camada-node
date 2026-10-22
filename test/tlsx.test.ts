@@ -64,9 +64,27 @@ describe('tlsx header, v3 tls entry', () => {
     expect(evs[0]).toMatchObject({ st: 403, blk: 'tls' });
   });
 
-  it('blocks a loopback peer (a proxy on the same host)', async () => {
+  it('blocks a loopback peer (a proxy on the same host) when the rightmost non-loopback XFF hop is trusted', async () => {
     const e = await engine(fakeAnalyst());
-    expect(hit(e, '127.0.0.1', { [HDR]: TLSX }).reason).toBe('tls');
+    expect(hit(e, '127.0.0.1', { [HDR]: TLSX, 'x-forwarded-for': `8.8.8.8, ${TRUSTED}` }).reason).toBe('tls');
+  });
+
+  it('ignores the header from a loopback peer when the rightmost XFF client is untrusted (nginx reached directly)', async () => {
+    const e = await engine(fakeAnalyst());
+    expect(hit(e, '127.0.0.1', { [HDR]: TLSX, 'x-forwarded-for': '8.8.8.8' }).blocked).toBe(false);
+    expect(hit(e, '127.0.0.1', { [HDR]: TLSX, 'x-forwarded-for': `${TRUSTED}, 8.8.8.8` }).blocked).toBe(false);
+  });
+
+  it('ignores the header from a loopback peer with no XFF or a malformed hop', async () => {
+    const e = await engine(fakeAnalyst());
+    expect(hit(e, '127.0.0.1', { [HDR]: TLSX }).blocked).toBe(false);
+    expect(hit(e, '::1', { [HDR]: TLSX, 'x-forwarded-for': '127.0.0.1' }).blocked).toBe(false);
+    expect(hit(e, '127.0.0.1', { [HDR]: TLSX, 'x-forwarded-for': `${TRUSTED}, garbage` }).blocked).toBe(false);
+  });
+
+  it('skips several loopback entries before the trusted hop', async () => {
+    const e = await engine(fakeAnalyst());
+    expect(hit(e, '127.0.0.1', { [HDR]: TLSX, 'x-forwarded-for': `${TRUSTED}, 127.0.0.2, ::1, ::ffff:127.0.0.1` }).reason).toBe('tls');
   });
 
   it('still tries another probe when the peer is the first probe address and the cidrs hold the others', async () => {
@@ -89,13 +107,13 @@ describe('tlsx header, v3 tls entry', () => {
   it.each(['none', 'hops:1', 'vercel'])('ignores the header in %s mode', async (mode) => {
     const e = await engine(fakeAnalyst(), { CAMADA_TRUSTED_PROXY: mode });
     expect(hit(e, TRUSTED, { [HDR]: TLSX }).blocked).toBe(false);
-    expect(hit(e, '127.0.0.1', { [HDR]: TLSX }).blocked).toBe(false);
+    expect(hit(e, '127.0.0.1', { [HDR]: TLSX, 'x-forwarded-for': TRUSTED }).blocked).toBe(false);
   });
 
   it('ignores the header in a mode the server config delivers (no local override) unless it is cidrs', async () => {
     const a = fakeAnalyst();   // trusted_proxy: none from the server
     const e = await engine(a, { CAMADA_TRUSTED_PROXY: undefined });
-    expect(hit(e, '127.0.0.1', { [HDR]: TLSX }).blocked).toBe(false);
+    expect(hit(e, '127.0.0.1', { [HDR]: TLSX, 'x-forwarded-for': TRUSTED }).blocked).toBe(false);
     const b = fakeAnalyst(); b.config.trusted_proxy = { mode: 'cidrs', cidrs: ['198.18.0.0/15'] };
     const e2 = await engine(b, { CAMADA_TRUSTED_PROXY: undefined });
     expect(hit(e2, TRUSTED, { [HDR]: TLSX }).reason).toBe('tls');
