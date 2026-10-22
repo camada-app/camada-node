@@ -38,11 +38,11 @@ async function engine(a: FakeAnalyst, env: Record<string, string | undefined> = 
 }
 
 /** One request through handle() with a chosen socket peer (`null`: a TCP socket that has none). */
-function hit(e: Camada, peer: string | null, headers: Record<string, string | string[]> = {}, extra: Record<string, unknown> = {}) {
+function hit(e: Camada, peer: string | null, headers: Record<string, string | string[]> = {}) {
   const sock = new Socket();
   Object.defineProperty(sock, 'remoteAddress', { value: peer ?? undefined });
   const req = new IncomingMessage(sock);
-  Object.assign(req, { method: 'GET', url: '/', headers: { host: 'a', ...headers }, ...extra });
+  Object.assign(req, { method: 'GET', url: '/', headers: { host: 'a', ...headers } });
   const res = new ServerResponse(req);
   const blocked = e.handle(req, res);
   sock.destroy();
