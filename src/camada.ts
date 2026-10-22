@@ -40,7 +40,7 @@ export interface CamadaOptions {
 interface CamadaRequest extends IncomingMessage {
   originalUrl?: string;          // Express/Nest: the full URL; `url` loses the mount path inside app.use('/x', …)
   body?: unknown;                // what a body parser mounted before camada left behind
-  camada?: { rid: string; ip: string | null; sid: string; ns: boolean; t0: number };   // ns: first visit (no session cookie came in); t0: request start
+  camada?: { rid: string; ip: string | null; sid: string; ns: boolean; t0: number; wrn?: string };   // ns: first visit (no session cookie came in); t0: request start
   route?: { path?: string };     // Express fills this after routing
   camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
   camadaSignalled?: boolean;     // a non-HTML request passed under a challenge: x-camada-challenge header + `chs: 1` on its event
@@ -121,6 +121,22 @@ function keepSessionCookie(res: ServerResponse, cookie: string): void {
     return set.call(this, name, value);
   } as ServerResponse['setHeader'];
   res.setHeader('set-cookie', cookie);
+}
+
+/** Marks a signalled response: `x-camada-challenge: 1` and `cache-control: no-store`. The header is
+ *  per client, so no shared cache may keep the copy. The app sets its own cache-control later (setHeader,
+ *  appendHeader, writeHead all route through them), so both are patched to keep no-store. */
+function signal(res: ServerResponse): void {
+  const set = res.setHeader, append = res.appendHeader;
+  const isCc = (n: unknown) => typeof n === 'string' && n.toLowerCase() === 'cache-control';
+  res.setHeader = function (this: ServerResponse, name: string, value: number | string | readonly string[]) {
+    return set.call(this, name, isCc(name) ? 'no-store' : value);
+  } as ServerResponse['setHeader'];
+  if (append) res.appendHeader = function (this: ServerResponse, name: string, value: string | readonly string[]) {
+    return isCc(name) ? this : append.call(this, name, value);
+  } as ServerResponse['appendHeader'];
+  res.setHeader('x-camada-challenge', '1');
+  res.setHeader('cache-control', 'no-store');
 }
 
 export class Camada {
@@ -271,8 +287,8 @@ export class Camada {
       }
     }
 
-    const { rid, sid, ns: newSession } = this.begin(req, res, ip, t0);
-    if (req.camadaSignalled) res.setHeader('x-camada-challenge', '1');
+    const { rid, sid, ns: newSession } = this.begin(req, res, ip, t0, v.warn ? v.rule : undefined);
+    if (req.camadaSignalled) signal(res);
 
     const cfg = this.snap.config;
     const excluded = (cfg?.exclude || []).some((x) => path.startsWith(x));
@@ -285,7 +301,7 @@ export class Camada {
 
   /** Mints the request's rid and session (setting the cookie on a first visit), records them on
    *  `req.camada` and sets `x-rid`. handle() and serveChallenge() (when handle() did not run) share it. */
-  private begin(req: CamadaRequest, res: ServerResponse, ip: string | null, t0: number): NonNullable<CamadaRequest['camada']> {
+  private begin(req: CamadaRequest, res: ServerResponse, ip: string | null, t0: number, wrn?: string): NonNullable<CamadaRequest['camada']> {
     const rid = randomUUID();
     let sid = cookieValue((req.headers.cookie as string) || '', SESSION_COOKIE);
     const ns = !sid;
@@ -295,7 +311,7 @@ export class Camada {
       keepSessionCookie(res, `${SESSION_COOKIE}=${sid}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
     }
     res.setHeader('x-rid', rid);
-    return (req.camada = { rid, ip, sid, ns, t0 });
+    return (req.camada = { rid, ip, sid, ns, t0, wrn });
   }
 
   /** Installs the response-finish hook that ships the request's normal capture event. */
@@ -473,11 +489,11 @@ export class Camada {
       const { path, query } = pathAndQuery(r);
       if (!isPage(r)) {
         // Not a page: the app renders, flagged. Its normal event ships with chs: 1.
+        if (!r.camadaSignalled) signal(res);   // handle() may have done it already
         r.camadaSignalled = true;
-        res.setHeader('x-camada-challenge', '1');
         if (r.camadaOpen === undefined) {
           const c = r.camada ?? this.begin(r, res, ip, Date.now());   // handle() ran (sampled out): its ids; else mint them as it would
-          this.hookCapture(r, res, path, query, ip, { rid: c.rid, sid: c.sid, newSession: c.ns, t0: c.t0 });
+          this.hookCapture(r, res, path, query, ip, { rid: c.rid, sid: c.sid, newSession: c.ns, t0: c.t0, wrn: c.wrn });
         }
         return false;
       }
