@@ -11,7 +11,7 @@ import {
   TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import iife from '@camada/browser/iife-string';
-import { resolveEnv, type ResolvedEnv } from './env.js';
+import { resolveEnv, parseTlsxHeader, type ResolvedEnv } from './env.js';
 import {
   CHALLENGE_PATH, nodeChallengeKit, readForm, parsedBody, isHttps, writeChallengePage,
 } from './challenge.js';
@@ -21,6 +21,8 @@ const SESSION_COOKIE = '_sfp';   // same cookie as the edge collector: sid/ns co
 const SCRIPT_PATH = '/_cam/b.js';
 const FP_PATH = '/_cam/fp';
 const FP_MAX = 32 * 1024;   // matches the server's /fp cap: never accept what ingest will 413
+const TLSX_PROBES = ['192.0.2.1', '198.51.100.1', '203.0.113.1'];   // RFC 5737 documentation addresses
+const TLSX_RE = /^[A-Za-z0-9+/=_-]+$/;
 const ATTACHED = Symbol.for('camada.attached');   // one wrap per server, however often attach() is called
 
 export interface CamadaOptions {
@@ -30,6 +32,7 @@ export interface CamadaOptions {
   scriptPath?: string;
   fpPath?: string;
   challenge?: boolean;           // enforce `challenge` verdicts with the first-party page (default true; CAMADA_CHALLENGE=0 also switches it off)
+  tlsxHeader?: string;           // header carrying the TLS fingerprint (CAMADA_TLSX_HEADER); read only from a trusted-proxy peer in cidrs mode
   challengePath?: string;        // where that page posts its solution (default /__camada/challenge)
   snapshotVersion?: SnapshotVersion;   // 5 (default) also carries the tenant's ordered custom rules; 4 the allow/challenge sides only; 3 opts out of both
   /** With CAMADA_SERVERLESS=1: handed every per-request event flush and snapshot refresh, so the
@@ -162,6 +165,7 @@ export class Camada {
   private readonly scriptPathSet: boolean;
   private readonly kit: ChallengeKit | null = null;
   private readonly envSource: Record<string, string | undefined>;
+  private readonly tlsxHeader: string | null = null;
   private readonly waitUntil?: (p: Promise<unknown>) => void;
 
   constructor(opts: CamadaOptions = {}) {
@@ -175,6 +179,7 @@ export class Camada {
     this.challengePathSet = opts.challengePath != null;
     this.scriptPathSet = opts.scriptPath != null;
     this.env = resolveEnv(this.envSource);
+    this.tlsxHeader = (opts.tlsxHeader != null ? parseTlsxHeader(opts.tlsxHeader) : null) ?? this.env?.tlsxHeader ?? null;
     if (!this.env) return;                       // unconfigured: every entry point no-ops
     if (this.envSource.CAMADA_DISABLED === '1') return;   // killed at boot: no poll timer, no exit hooks, truly silent
     this.snap = new SnapshotClient({
@@ -204,6 +209,25 @@ export class Camada {
     const peer = req.socket?.remoteAddress;
     if (!peer && req.socket && !onUnixListener(req.socket)) return null;
     return resolveClientIp(peer ?? null, req.headers['x-forwarded-for'] as string | undefined, this.trustedProxy());
+  }
+
+  /** The TLS fingerprint a trusted proxy (Cloudflare Transform Rule) put in the opt-in header, or
+   *  null. Only trusted in `cidrs` mode and only when the socket peer is itself a trusted proxy:
+   *  anyone else could write the header. A peer is trusted exactly when core's XFF walk would
+   *  believe the entry the peer forwarded, so that is probed: the peer forwards a TEST-NET
+   *  address, and only a trusted peer gets it echoed back (an untrusted one resolves to itself).
+   *  A probe equal to the peer is skipped, and a probe inside the trusted ranges echoes the peer
+   *  instead, so a second one is tried. No readable peer (unix listener included) -> null, since
+   *  core's no-peer walk would trust everyone. */
+  private tlsxOf(req: IncomingMessage): string | null {
+    const header = this.tlsxHeader;
+    const cfg = this.trustedProxy();
+    const peer = req.socket?.remoteAddress;
+    if (!header || cfg?.mode !== 'cidrs' || !peer) return null;
+    const trusted = TLSX_PROBES.some((probe) => !peer.endsWith(probe) && resolveClientIp(peer, probe, cfg) === probe);
+    if (!trusted) return null;
+    const v = req.headers[header];
+    return typeof v === 'string' && v.length <= 128 && TLSX_RE.test(v) ? v : null;   // an array (repeated header) or comma-joined value fails the charset
   }
 
   /** Where the challenge form posts: under the mount prefix, so it reaches camada, unless the
@@ -256,7 +280,7 @@ export class Camada {
     // enforce before anything else, beacon endpoints included — fail open while cold. The custom
     // rules read the user agent and the request headers (§D3); without them every `ua` and
     // `header` condition is false.
-    const v = this.snap.verdict({ ip, path, ua: req.headers['user-agent'], header: headerReader(req) });
+    const v = this.snap.verdict({ ip, path, ua: req.headers['user-agent'], header: headerReader(req), tlsx: this.tlsxOf(req) });
     if (v.block) {
       const headers: Record<string, string> = { 'x-block-reason': v.reason ?? '', 'x-block-version': v.version ?? '', 'content-type': 'text/plain', 'cache-control': 'no-store' };
       if (v.rule) headers['x-block-rule'] = v.rule;   // a custom rule blocked: name it, so the customer knows which row to edit

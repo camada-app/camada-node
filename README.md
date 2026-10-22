@@ -140,6 +140,28 @@ fire on your app's own truth instead of path heuristics:
 | `payment_failed` / `payment_succeeded` | a payment authorisation settled |
 | `coupon_failed` | a promo/voucher code was rejected |
 
+## TLS fingerprint behind Cloudflare
+
+Node has no TLS handshake to read, but Cloudflare does. Set `CAMADA_TLSX_HEADER=x-camada-tlsx`
+(or `createCamada({ tlsxHeader: 'x-camada-tlsx' })`) and add a Transform Rule that forwards it:
+*Rules > Transform Rules > Modify Request Header*, "Set static/dynamic", header `x-camada-tlsx`,
+value `cf.tls_client_extensions_sha1`. The value then feeds the same matcher as `@camada/hono`'s
+`request.cf.tlsClientExtensionsSha1`: the snapshot's `tls` entries block with
+`x-block-reason: tls`, and rule `tlsx is` / `is_in` conditions apply.
+
+The header is believed only when Cloudflare is a trusted proxy, because anyone else can write it:
+
+```
+CAMADA_TRUSTED_PROXY=cidrs:173.245.48.0/20,103.21.244.0/22,…   # Cloudflare's published ranges
+CAMADA_TLSX_HEADER=x-camada-tlsx
+```
+
+It is read only in `cidrs` mode and only when the socket peer is inside those ranges (or is
+loopback, a proxy on the same host). In `none`, `hops` or `vercel` mode, from any other peer, on
+a socket with no readable peer (unix listeners included), or with a malformed value (over 128
+characters, outside `[A-Za-z0-9+/=_-]`, or a repeated header), it is ignored and `tlsx`
+conditions fail open. The fingerprint is not sent to camada: events carry no `tlsx`.
+
 ## WebSockets
 
 Node hands an upgrade request (a WebSocket handshake) to the server's `'upgrade'` listeners,
@@ -174,8 +196,10 @@ handshake your library then rejects still ships `st: 101`.
 - The challenge page sends its own `Content-Security-Policy` allowing only its inline script and
   style by `sha256` hash, and drops any `Content-Security-Policy(-Report-Only)` set before it.
 - Enforcement scope at this position: IP, path, user-agent and request-header conditions. ASN,
-  country and TLS-fingerprint conditions can't be evaluated in-app and fail open (a rule that
-  needs one never matches here; run `@camada/hono` on Cloudflare Workers for those).
+  country conditions can't be evaluated in-app and fail open (a rule that needs one never
+  matches here; run `@camada/hono` on Cloudflare Workers for those). TLS-fingerprint conditions
+  match only with the opt-in `CAMADA_TLSX_HEADER` (see "TLS fingerprint behind Cloudflare");
+  without it they fail open too.
 - `await camada.stop()` in your own graceful shutdown stops polling and the event queue. It
   returns a promise that settles once queued rows (a drain in flight, or rows held by an ingest
   429) are sent, or counted as dropped if the send fails; it never rejects.
