@@ -6,6 +6,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { Socket } from 'node:net';
 import { IncomingMessage, ServerResponse } from 'node:http';
 import type { Camada } from '../src/index.js';
+import type { TrustedProxyConfig } from '@camada/core';
 import { fakeAnalyst, engineWith, loaded, settle, V5_META, ALLOWED_IP, type FakeAnalyst } from './harness.js';
 
 const open: Camada[] = [];
@@ -28,19 +29,7 @@ const RULES_META = JSON.stringify({
 });
 
 async function engine(a: FakeAnalyst, env: Record<string, string | undefined> = {}, opts: Parameters<typeof engineWith>[2] = {}) {
-  if (a.v5 && !a.v4) {   // swap the golden v5 meta for the tlsx rules over the same bin
-    const real = a.fetchImpl;
-    a.fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-      const r = await real(url, init);
-      if (!String(url).endsWith('/snapshot')) return r;
-      const buf = new Uint8Array(await r.arrayBuffer());
-      const bin = buf.subarray(4 + new DataView(buf.buffer, buf.byteOffset).getUint32(0, true));
-      const m = new TextEncoder().encode(RULES_META);
-      const f = new Uint8Array(4 + m.length + bin.length);
-      new DataView(f.buffer).setUint32(0, m.length, true); f.set(m, 4); f.set(bin, 4 + m.length);
-      return new Response(f, { status: 200, headers: { etag: '"tlsx-rules"', 'x-camada-config': r.headers.get('x-camada-config')! } });
-    }) as typeof fetch;
-  }
+  if (a.v5 && !a.v4) a.v5Meta = RULES_META;   // swap the golden v5 meta for the tlsx rules over the same bin
   const e = engineWith(a, { CAMADA_TLSX_HEADER: HDR, CAMADA_TRUSTED_PROXY: CIDRS, ...env }, opts);
   open.push(e);
   await loaded(e);
@@ -129,6 +118,38 @@ describe('tlsx header, v3 tls entry', () => {
   it('ignores the header on a TCP socket with no readable peer', async () => {
     const e = await engine(fakeAnalyst());
     expect(hit(e, null, { [HDR]: TLSX }).blocked).toBe(false);
+  });
+});
+
+describe('peer trust cache', () => {
+  /** A cidrs config whose `cidrs` reads are counted: every resolveClientIp probe reads it. */
+  const counted = () => {
+    const state = { reads: 0 };
+    const cfg = { mode: 'cidrs', get cidrs() { state.reads++; return ['198.18.0.0/15']; } } as unknown as TrustedProxyConfig;
+    return { state, cfg };
+  };
+
+  it('probes a repeated trusted peer once, and again after the config object changes', async () => {
+    const e = await engine(fakeAnalyst());
+    const one = counted(), two = counted();
+    let cur = one.cfg;
+    (e as unknown as { trustedProxy: () => TrustedProxyConfig }).trustedProxy = () => cur;
+    expect(hit(e, TRUSTED, { [HDR]: TLSX }).reason).toBe('tls');
+    const first = one.state.reads;
+    expect(first).toBeGreaterThan(0);
+    expect(hit(e, TRUSTED, { [HDR]: TLSX }).reason).toBe('tls');
+    expect(one.state.reads).toBe(first);
+    cur = two.cfg;
+    expect(hit(e, TRUSTED, { [HDR]: TLSX }).reason).toBe('tls');
+    expect(two.state.reads).toBeGreaterThan(0);
+  });
+
+  it('does not probe at all when the header is absent', async () => {
+    const e = await engine(fakeAnalyst());
+    const c = counted();
+    (e as unknown as { trustedProxy: () => TrustedProxyConfig }).trustedProxy = () => c.cfg;
+    hit(e, TRUSTED);
+    expect(c.state.reads).toBe(0);
   });
 });
 

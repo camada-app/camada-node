@@ -165,7 +165,9 @@ export class Camada {
   private readonly scriptPathSet: boolean;
   private readonly kit: ChallengeKit | null = null;
   private readonly envSource: Record<string, string | undefined>;
-  private readonly tlsxHeader: string | null = null;
+  private readonly tlsxHeader: string | null;
+  private tlsxPeers = new Map<string, boolean>();   // peer -> is a trusted proxy, valid for tlsxPeersCfg only
+  private tlsxPeersCfg: TrustedProxyConfig | null = null;
   private readonly waitUntil?: (p: Promise<unknown>) => void;
 
   constructor(opts: CamadaOptions = {}) {
@@ -179,7 +181,7 @@ export class Camada {
     this.challengePathSet = opts.challengePath != null;
     this.scriptPathSet = opts.scriptPath != null;
     this.env = resolveEnv(this.envSource);
-    this.tlsxHeader = (opts.tlsxHeader != null ? parseTlsxHeader(opts.tlsxHeader) : null) ?? this.env?.tlsxHeader ?? null;
+    this.tlsxHeader = parseTlsxHeader(opts.tlsxHeader) ?? this.env?.tlsxHeader ?? null;
     if (!this.env) return;                       // unconfigured: every entry point no-ops
     if (this.envSource.CAMADA_DISABLED === '1') return;   // killed at boot: no poll timer, no exit hooks, truly silent
     this.snap = new SnapshotClient({
@@ -221,13 +223,20 @@ export class Camada {
    *  core's no-peer walk would trust everyone. */
   private tlsxOf(req: IncomingMessage): string | null {
     const header = this.tlsxHeader;
+    if (!header) return null;
+    const v = headerReader(req)(header);   // a repeated header joins with ', ', which the charset rejects
+    if (v == null || v.length > 128 || !TLSX_RE.test(v)) return null;
     const cfg = this.trustedProxy();
     const peer = req.socket?.remoteAddress;
-    if (!header || cfg?.mode !== 'cidrs' || !peer) return null;
-    const trusted = TLSX_PROBES.some((probe) => !peer.endsWith(probe) && resolveClientIp(peer, probe, cfg) === probe);
-    if (!trusted) return null;
-    const v = req.headers[header];
-    return typeof v === 'string' && v.length <= 128 && TLSX_RE.test(v) ? v : null;   // an array (repeated header) or comma-joined value fails the charset
+    if (cfg?.mode !== 'cidrs' || !peer) return null;
+    if (cfg !== this.tlsxPeersCfg) { this.tlsxPeers.clear(); this.tlsxPeersCfg = cfg; }
+    let trusted = this.tlsxPeers.get(peer);
+    if (trusted === undefined) {
+      trusted = TLSX_PROBES.some((probe) => !peer.endsWith(probe) && resolveClientIp(peer, probe, cfg) === probe);
+      if (this.tlsxPeers.size >= 1024) this.tlsxPeers.clear();
+      this.tlsxPeers.set(peer, trusted);
+    }
+    return trusted ? v : null;
   }
 
   /** Where the challenge form posts: under the mount prefix, so it reaches camada, unless the
