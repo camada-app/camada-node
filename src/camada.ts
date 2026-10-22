@@ -411,7 +411,7 @@ export class Camada {
       res.writeHead(204, { 'cache-control': 'no-store' });
       res.end();
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Buffer.isBuffer(parsed)) return;
-      const row: Record<string, unknown> = { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE };
+      const row: Record<string, unknown> = { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE, rts: Date.now() };
       for (const k of REQUEST_ROW_KEYS) delete row[k];
       this.enqueue(row);
     };
