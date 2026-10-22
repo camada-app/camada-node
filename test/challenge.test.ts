@@ -322,6 +322,46 @@ describe('serveChallenge() on a non-HTML request', () => {
     await engine.queue!.flush();
     expect(events(a).filter((e) => e.p === '/challenge-me')).toEqual([expect.objectContaining({ st: 200, chs: 1 })]);
   });
+
+  it('reuses handle()\'s rid and new-session flag when handle() sampled the request out', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    a.config = { ...a.config, sample: 0 };
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      if (engine.serveChallenge(req, res)) return;
+      res.writeHead(200).end('{"ok":true}');
+    });
+    open.push(app, engine);
+    a.events.length = 0;
+    const r = await fetch(`${app.url}/challenge-me`, { headers: { accept: 'application/json', 'x-forwarded-for': '8.8.8.8' } });
+    await settle();
+    await engine.queue!.flush();
+    const ev = events(a).filter((e) => e.p === '/challenge-me');
+    expect(ev).toEqual([expect.objectContaining({ chs: 1, ns: 1, rid: r.headers.get('x-rid') })]);
+  });
+
+  it('mints x-rid itself when handle() did not run', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => {
+      if (engine.serveChallenge(req, res)) return;
+      res.writeHead(200).end('{"ok":true}');
+    });
+    open.push(app, engine);
+    a.events.length = 0;
+    const r = await fetch(`${app.url}/challenge-me`, { headers: { accept: 'application/json', 'x-forwarded-for': '8.8.8.8' } });
+    expect(r.headers.get('x-camada-challenge')).toBe('1');
+    const rid = r.headers.get('x-rid');
+    expect(rid).toBeTruthy();
+    await settle();
+    await engine.queue!.flush();
+    expect(events(a).filter((e) => e.p === '/challenge-me')).toEqual([expect.objectContaining({ chs: 1, rid })]);
+  });
 });
 
 describe('content security policy (camada-all-mwpo)', () => {

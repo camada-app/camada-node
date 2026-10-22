@@ -40,7 +40,7 @@ export interface CamadaOptions {
 interface CamadaRequest extends IncomingMessage {
   originalUrl?: string;          // Express/Nest: the full URL; `url` loses the mount path inside app.use('/x', …)
   body?: unknown;                // what a body parser mounted before camada left behind
-  camada?: { rid: string; ip: string | null; sid: string };
+  camada?: { rid: string; ip: string | null; sid: string; ns: boolean; t0: number };   // ns: first visit (no session cookie came in); t0: request start
   route?: { path?: string };     // Express fills this after routing
   camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
   camadaSignalled?: boolean;     // a non-HTML request passed under a challenge: x-camada-challenge header + `chs: 1` on its event
@@ -271,16 +271,7 @@ export class Camada {
       }
     }
 
-    const rid = randomUUID();
-    let sid = cookieValue((req.headers.cookie as string) || '', SESSION_COOKIE);
-    const newSession = !sid;
-    if (!sid) {
-      sid = randomUUID();
-      const https = (req.socket as { encrypted?: boolean }).encrypted || req.headers['x-forwarded-proto'] === 'https';
-      keepSessionCookie(res, `${SESSION_COOKIE}=${sid}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
-    }
-    req.camada = { rid, ip, sid };
-    res.setHeader('x-rid', rid);
+    const { rid, sid, ns: newSession } = this.begin(req, res, ip, t0);
     if (req.camadaSignalled) res.setHeader('x-camada-challenge', '1');
 
     const cfg = this.snap.config;
@@ -290,6 +281,21 @@ export class Camada {
       this.hookCapture(req, res, path, query, ip, { rid, sid, newSession, t0, wrn: v.warn ? v.rule : undefined });
     }
     return false;
+  }
+
+  /** Mints the request's rid and session (setting the cookie on a first visit), records them on
+   *  `req.camada` and sets `x-rid`. handle() and serveChallenge() (when handle() did not run) share it. */
+  private begin(req: CamadaRequest, res: ServerResponse, ip: string | null, t0: number): NonNullable<CamadaRequest['camada']> {
+    const rid = randomUUID();
+    let sid = cookieValue((req.headers.cookie as string) || '', SESSION_COOKIE);
+    const ns = !sid;
+    if (!sid) {
+      sid = randomUUID();
+      const https = (req.socket as { encrypted?: boolean }).encrypted || req.headers['x-forwarded-proto'] === 'https';
+      keepSessionCookie(res, `${SESSION_COOKIE}=${sid}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
+    }
+    res.setHeader('x-rid', rid);
+    return (req.camada = { rid, ip, sid, ns, t0 });
   }
 
   /** Installs the response-finish hook that ships the request's normal capture event. */
@@ -470,7 +476,8 @@ export class Camada {
         r.camadaSignalled = true;
         res.setHeader('x-camada-challenge', '1');
         if (r.camadaOpen === undefined) {
-          this.hookCapture(r, res, path, query, ip, { rid: r.camada?.rid ?? randomUUID(), sid: r.camada?.sid ?? this.sessionOf(r), newSession: false, t0: Date.now() });
+          const c = r.camada ?? this.begin(r, res, ip, Date.now());   // handle() ran (sampled out): its ids; else mint them as it would
+          this.hookCapture(r, res, path, query, ip, { rid: c.rid, sid: c.sid, newSession: c.ns, t0: c.t0 });
         }
         return false;
       }
