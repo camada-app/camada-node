@@ -3,6 +3,7 @@
 // the cookie lets the next request through.
 import { describe, it, expect, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
+import http2 from 'node:http2';
 import { CHALLENGE_COOKIE } from '@camada/core';
 import type { Camada } from '../src/index.js';
 import {
@@ -299,26 +300,65 @@ describe('serveChallenge()', () => {
 });
 
 describe('signalled cache-control (82ar)', () => {
+  const cc = 'public, max-age=300';
+  const ways: Record<string, (res: import('node:http').ServerResponse) => void> = {
+    '/set': (res) => { res.setHeader('cache-control', cc); res.writeHead(200); res.end('{}'); },
+    '/head': (res) => { res.writeHead(200, { 'Cache-Control': cc }).end('{}'); },
+    '/array': (res) => { res.writeHead(200, ['cache-control', cc]).end('{}'); },
+    '/tuple': (res) => { res.writeHead(200, [['Cache-Control', cc]]).end('{}'); },
+    '/remove': (res) => { res.removeHeader('cache-control'); res.end('{}'); },
+    '/removeset': (res) => { res.removeHeader('cache-control'); res.setHeader('cache-control', cc); res.end('{}'); },
+    '/append': (res) => { res.appendHeader('cache-control', cc); res.writeHead(200).end('{}'); },
+    '/implicit': (res) => { res.setHeader('cache-control', cc); res.end('{}'); },
+  };
+
   it('ends no-store whichever way the app sets cache-control; an unsignalled response keeps its own', async () => {
     const a = fakeAnalyst();
     a.v4 = true;
     const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
     await loaded(engine);
-    const cc = 'public, max-age=300';
     const app = await serve((req, res) => {
       if (engine.handle(req, res)) return;
-      if (req.url === '/set') res.setHeader('cache-control', cc);
       if (req.url === '/hook' && engine.serveChallenge(req, res)) return;
       if (req.url === '/hook') { res.writeHead(200, { 'cache-control': cc }).end('{}'); return; }
-      if (req.url === '/append') res.appendHeader('cache-control', cc);
-      res.writeHead(200, req.url === '/head' ? { 'cache-control': cc } : {}).end('{}');
+      ways[req.url!](res);
     });
     open.push(app, engine);
     const get = (path: string, ip: string) => fetch(`${app.url}${path}`, { headers: { accept: 'application/json', 'x-forwarded-for': ip } });
-    for (const path of ['/set', '/head', '/append', '/hook']) {
-      expect((await get(path, CHALLENGED_IP)).headers.get('cache-control')).toBe('no-store');
+    for (const path of [...Object.keys(ways), '/hook']) {
+      const r = await get(path, CHALLENGED_IP);
+      expect([path, r.headers.get('x-camada-challenge'), r.headers.get('cache-control')]).toEqual([path, '1', 'no-store']);
     }
     expect((await get('/head', ALLOWED_IP)).headers.get('cache-control')).toBe(cc);
+  });
+
+  it('holds on an http2 compat server (writeHead applies headers past setHeader)', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const srv = http2.createServer((req, res) => {
+      if (engine.handle(req as never, res as never)) return;
+      if (req.url === '/head') res.writeHead(200, { 'cache-control': cc });
+      res.end('{}');
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    open.push(engine);
+    const client = http2.connect(`http://127.0.0.1:${(srv.address() as { port: number }).port}`);
+    try {
+      const get = (path: string, ip: string) => new Promise<http2.IncomingHttpHeaders>((resolve, reject) => {
+        const rq = client.request({ ':path': path, accept: 'application/json', 'x-forwarded-for': ip });
+        rq.on('response', resolve).on('error', reject).resume();
+      });
+      for (const path of ['/head', '/implicit']) {
+        const h = await get(path, CHALLENGED_IP);
+        expect([path, h['x-camada-challenge'], h['cache-control']]).toEqual([path, '1', 'no-store']);
+      }
+      expect((await get('/head', ALLOWED_IP))['cache-control']).toBe(cc);
+    } finally {
+      client.close();
+      srv.close();
+    }
   });
 });
 

@@ -124,17 +124,27 @@ function keepSessionCookie(res: ServerResponse, cookie: string): void {
 }
 
 /** Marks a signalled response: `x-camada-challenge: 1` and `cache-control: no-store`. The header is
- *  per client, so no shared cache may keep the copy. The app sets its own cache-control later (setHeader,
- *  appendHeader, writeHead all route through them), so both are patched to keep no-store. */
+ *  per client, so no shared cache may keep the copy, whatever the app sets. Every flush (an explicit
+ *  writeHead, http1's `_implicitHeader`, http2 compat's end/write/flushHeaders) goes through
+ *  `this.writeHead`, so that is the one choke point: it drops any cache-control from the headers it is
+ *  given (object, flat array, tuple array) and re-sets no-store with the original setHeader. */
 function signal(res: ServerResponse): void {
-  const set = res.setHeader, append = res.appendHeader;
+  const set = res.setHeader, writeHead = res.writeHead;
   const isCc = (n: unknown) => typeof n === 'string' && n.toLowerCase() === 'cache-control';
-  res.setHeader = function (this: ServerResponse, name: string, value: number | string | readonly string[]) {
-    return set.call(this, name, isCc(name) ? 'no-store' : value);
-  } as ServerResponse['setHeader'];
-  if (append) res.appendHeader = function (this: ServerResponse, name: string, value: string | readonly string[]) {
-    return isCc(name) ? this : append.call(this, name, value);
-  } as ServerResponse['appendHeader'];
+  const strip = (h: unknown): unknown => {
+    if (Array.isArray(h)) {
+      if (h.length && Array.isArray(h[0])) return h.filter((p) => !isCc(p[0]));
+      const out: unknown[] = [];
+      for (let i = 0; i < h.length; i += 2) if (!isCc(h[i])) out.push(h[i], h[i + 1]);
+      return out;
+    }
+    if (h && typeof h === 'object') return Object.fromEntries(Object.entries(h).filter(([k]) => !isCc(k)));
+    return h;
+  };
+  res.writeHead = function (this: ServerResponse, status: number, ...rest: unknown[]) {
+    if (!this.headersSent) set.call(this, 'cache-control', 'no-store');
+    return (writeHead as (...a: unknown[]) => ServerResponse).call(this, status, ...rest.map(strip));
+  } as ServerResponse['writeHead'];
   res.setHeader('x-camada-challenge', '1');
   res.setHeader('cache-control', 'no-store');
 }
@@ -294,7 +304,7 @@ export class Camada {
     const excluded = (cfg?.exclude || []).some((x) => path.startsWith(x));
     // A signalled request ships regardless of sample and exclude, like the 403 row it replaces.
     if (req.camadaSignalled || (!excluded && Math.random() < (cfg?.sample ?? 1))) {
-      this.hookCapture(req, res, path, query, ip, { rid, sid, newSession, t0, wrn: v.warn ? v.rule : undefined });
+      this.hookCapture(req, res, path, query, ip, { rid, sid, newSession, t0 });
     }
     return false;
   }
@@ -316,7 +326,7 @@ export class Camada {
 
   /** Installs the response-finish hook that ships the request's normal capture event. */
   private hookCapture(req: CamadaRequest, res: ServerResponse, path: string, query: string, ip: string | null,
-    o: { rid: string; sid: string | null; newSession: boolean; t0: number; wrn?: string }): void {
+    o: { rid: string; sid: string | null; newSession: boolean; t0: number }): void {
     // 'finish' when the response went out whole; 'close' alone when the client left first (an
     // aborted SSE or download), which ships the status set so far and dur up to the abort — the
     // fetch adapters' cancel semantics. 'close' also follows every 'finish': one event either way.
@@ -335,7 +345,7 @@ export class Camada {
       ev.st = res.statusCode;
       ev.dur = Date.now() - o.t0;
       if (req.route?.path) ev.rt = String(req.route.path);
-      if (o.wrn) ev.wrn = o.wrn;   // §D3: the warn rule that let this request through
+      if (req.camada?.wrn) ev.wrn = req.camada.wrn;   // §D3: the warn rule that let this request through
       if (req.camadaSignalled) ev.chs = 1;   // challenge signalled (camada-all-82ar)
       this.enqueue(ev, req);
     }, undefined);
@@ -493,7 +503,7 @@ export class Camada {
         r.camadaSignalled = true;
         if (r.camadaOpen === undefined) {
           const c = r.camada ?? this.begin(r, res, ip, Date.now());   // handle() ran (sampled out): its ids; else mint them as it would
-          this.hookCapture(r, res, path, query, ip, { rid: c.rid, sid: c.sid, newSession: c.ns, t0: c.t0, wrn: c.wrn });
+          this.hookCapture(r, res, path, query, ip, { rid: c.rid, sid: c.sid, newSession: c.ns, t0: c.t0 });
         }
         return false;
       }
