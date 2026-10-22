@@ -168,11 +168,11 @@ Behind a local reverse proxy (nginx or Caddy on loopback) or a cloudflared tunne
 loopback, so the header is not read and `tlsx` conditions fail open; `X-Forwarded-For` is never
 consulted. The same holds in `none`, `hops` or `vercel` mode, from any other peer, with no readable
 peer (unix listeners included), or with a malformed value (over 128 characters, outside
-`[A-Za-z0-9+/=_-]`, or a repeated header). The Transform Rule must set the header on every request.
-The same trusted value is sent to camada as `tlsx` on request events (pass, block, challenge and
-upgrade rows), never on `track()` rows or the beacon relay, and a value that failed the checks above
-is never sent. The analyst uses it to group traffic by TLS fingerprint and to recommend or block
-rare fingerprints.
+`[A-Za-z0-9+/=_-]`, or a repeated header). The Transform Rule must overwrite the header on every
+request: on a request it skips, a client-sent value passes through. The same trusted value is sent
+to camada as `tlsx` on request events (pass, block, challenge and upgrade rows); node never adds it
+to `track()` rows or the beacon relay, and a value that failed the checks above is never sent. The
+analyst uses it to group traffic by TLS fingerprint and to recommend or block rare fingerprints.
 
 ## WebSockets
 
