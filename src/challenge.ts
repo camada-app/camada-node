@@ -73,8 +73,3 @@ export function writeChallengePage(res: ServerResponse, o: ChallengePageOptions)
   });
   res.end(challengePage(o));
 }
-
-export function writeChallengeJson(res: ServerResponse): void {
-  res.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-camada-challenge': '1' });
-  res.end('{"error":"challenge_required"}');
-}

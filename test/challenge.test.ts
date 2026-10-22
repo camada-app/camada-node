@@ -67,18 +67,56 @@ describe('serving the challenge', () => {
     expect(events(a).at(-1)).toMatchObject({ st: 403, blk: 'challenge', p: '/cart', tap: 'sdk-node' });
   });
 
-  it('answers 403 JSON for a non-HTML request', async () => {
-    const { app } = await v4App();
+  it('passes a JSON request to the app with the header, x-rid and a chs: 1 event', async () => {
+    const { a, engine, app } = await v4App();
     const r = await fetch(`${app.url}/checkout`, { headers: { accept: 'application/json', 'x-forwarded-for': CHALLENGED_IP } });
-    expect(r.status).toBe(403);
-    expect(r.headers.get('content-type')).toContain('application/json');
-    expect(await r.json()).toEqual({ error: 'challenge_required' });
+    expect(r.status).toBe(200);
+    expect(await r.text()).toContain('app');
+    expect(r.headers.get('x-camada-challenge')).toBe('1');
+    expect(r.headers.get('x-rid')).toBeTruthy();
+    await settle();
+    await engine.queue!.flush();
+    const ev = events(a).find((e) => e.p === '/checkout')!;
+    expect(ev).toMatchObject({ st: 200, chs: 1 });
+    expect(ev.blk).toBeUndefined();
   });
 
-  it('answers 403 JSON when sec-fetch-dest is not a document', async () => {
+  it('passes with the header when sec-fetch-dest is not a document', async () => {
     const { app } = await v4App();
     const r = await fetch(`${app.url}/checkout`, { headers: { accept: 'text/html', 'sec-fetch-dest': 'empty', 'x-forwarded-for': CHALLENGED_IP } });
-    expect(await r.json()).toEqual({ error: 'challenge_required' });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-camada-challenge')).toBe('1');
+  });
+
+  it('ships a signalled event even at sample 0 and on an excluded path', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    a.config = { ...a.config, sample: 0, exclude: ['/health'] };
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    const app = await serve((req, res) => { if (engine.handle(req, res)) return; res.writeHead(200).end('ok'); });
+    open.push(app, engine);
+    a.events.length = 0;
+    const h = { accept: 'application/json', 'x-forwarded-for': CHALLENGED_IP };
+    await fetch(`${app.url}/health`, { headers: h });
+    await fetch(`${app.url}/other`, { headers: h });
+    await fetch(`${app.url}/clean`, { headers: { accept: 'application/json', 'x-forwarded-for': ALLOWED_IP } });
+    await settle();
+    await engine.queue!.flush();
+    expect(events(a).filter((e) => e.chs === 1).map((e) => e.p).sort()).toEqual(['/health', '/other']);
+    expect(events(a).some((e) => e.p === '/clean')).toBe(false);
+  });
+
+  it('a valid _cch gets no header and no chs on a JSON request', async () => {
+    const { a, engine, app } = await v4App();
+    const cookie = (await pass(app)).headers.get('set-cookie')!.split(';')[0];
+    a.events.length = 0;
+    const r = await fetch(`${app.url}/checkout`, { headers: { accept: 'application/json', cookie, 'x-forwarded-for': CHALLENGED_IP } });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-camada-challenge')).toBeNull();
+    await settle();
+    await engine.queue!.flush();
+    expect(events(a).find((e) => e.p === '/checkout')!.chs).toBeUndefined();
   });
 
   it('challenges on a path rule, not just an ip', async () => {
@@ -257,6 +295,32 @@ describe('serveChallenge()', () => {
     // The response-finish hook must not add a second, reason-less row for the same request.
     expect(events(a).filter((e) => e.p === '/challenge-me')).toHaveLength(1);
     expect(events(a).at(-1)).toMatchObject({ st: 403, blk: 'challenge' });
+  });
+});
+
+describe('serveChallenge() on a non-HTML request', () => {
+  it('sets the header, stamps chs: 1 and returns false so the app answers', async () => {
+    const a = fakeAnalyst();
+    a.v4 = true;
+    a.config = { ...a.config, sample: 0 };
+    const engine = engineWith(a, { CAMADA_TRUSTED_PROXY: 'hops:1' });
+    await loaded(engine);
+    let returned: boolean | null = null;
+    const app = await serve((req, res) => {
+      if (engine.handle(req, res)) return;
+      returned = engine.serveChallenge(req, res);
+      if (returned) return;
+      res.writeHead(200).end('{"ok":true}');
+    });
+    open.push(app, engine);
+    a.events.length = 0;
+    const r = await fetch(`${app.url}/challenge-me`, { headers: { accept: 'application/json', 'x-forwarded-for': '8.8.8.8' } });
+    expect(r.status).toBe(200);
+    expect(returned).toBe(false);
+    expect(r.headers.get('x-camada-challenge')).toBe('1');
+    await settle();
+    await engine.queue!.flush();
+    expect(events(a).filter((e) => e.p === '/challenge-me')).toEqual([expect.objectContaining({ st: 200, chs: 1 })]);
   });
 });
 
