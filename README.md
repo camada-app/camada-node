@@ -118,13 +118,27 @@ for the newest is always safe.
 HTML templates add the beacon with the helper (or use `@camada/react`'s `<CamadaBeacon/>`):
 
 ```js
+// Express / Nest
 res.send(`<head>${camada.scriptTag(req)}</head>…`);
+
+// Fastify
+reply.type('text/html').send(`<head>${camada.scriptTag(request.raw)}</head>…`);
+
+// Koa
+ctx.type = 'html';
+ctx.body = `<head>${camada.scriptTag(ctx.req)}</head>…`;
 ```
+
+`scriptTag()` and `track()` take the Node `IncomingMessage`: `req` in Express and Nest, `request.raw` in
+Fastify, `ctx.req` in Koa. `camada` is the default import from `@camada/node`; Fastify, Koa and Nest users
+import it beside the adapter.
 
 App-context outcomes (the signals no edge tap can see; identifiers are HMAC-hashed in-process):
 
 ```js
-camada.track(req, 'login_failed', { user: email });
+camada.track(req, 'login_failed', { user: email });            // Express / Nest
+camada.track(request.raw, 'login_failed', { user: email });    // Fastify
+camada.track(ctx.req, 'login_failed', { user: email });        // Koa
 ```
 
 The event name is free-form, but the analyst's app-context rules read a fixed vocabulary — use these names
