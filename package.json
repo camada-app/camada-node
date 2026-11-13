@@ -18,6 +18,31 @@
   },
   "name": "@camada/node",
   "description": "camada backend SDK for Node: request capture, inline blocking, first-party beacon serving; Express/Fastify/Nest/Koa adapters",
+  "homepage": "https://www.camada.app/docs/quickstart/express",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/camada-app/camada-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/camada-app/camada-node/issues"
+  },
+  "keywords": [
+    "camada",
+    "nodejs",
+    "express",
+    "fastify",
+    "nestjs",
+    "koa",
+    "bot-detection",
+    "bot-protection",
+    "credential-stuffing",
+    "account-takeover",
+    "rate-limiting",
+    "proof-of-work",
+    "ai-scraper",
+    "middleware",
+    "security"
+  ],
   "exports": {
     ".": {
       "import": {

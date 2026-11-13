@@ -1,5 +1,7 @@
 # @camada/node
 
+[Express guide](https://www.camada.app/docs/quickstart/express) · [Bot detection](https://www.camada.app/bot-detection) · [Bot signal test](https://www.camada.app/tools/bot-test) · [Pricing](https://www.camada.app/pricing).
+
 camada's backend SDK for Node: captures request metadata on response-finish (real status,
 latency, and the true wire header order no proxy position can see), enforces the tenant
 blocklist inline before your app runs, and serves the fingerprint beacon first-party at
@@ -62,7 +64,7 @@ full path, and its own endpoints answer under the prefix.
 
 1. Refreshes the blocklist snapshot off-path (30 s poll, ETag; cold start fails open). Every
    poll and event batch carries `x-camada-sdk: @camada/node/<version>`.
-2. Resolves the client IP per your tenant's trusted-proxy config — raw `X-Forwarded-For` is
+2. Resolves the client IP per your tenant's trusted-proxy config: raw `X-Forwarded-For` is
    never trusted without it (`CAMADA_TRUSTED_PROXY=hops:1|cidrs:…|vercel` overrides locally).
    On a unix-socket listener (nginx or Passenger in front) Node has no peer address, so the walk
    runs without one and trusts the local proxy that owns the socket. A TCP request whose peer is
@@ -71,7 +73,7 @@ full path, and its own endpoints answer under the prefix.
    Blocked → `403` with `x-block-reason` before your app; the event still ships, with
    `st: 403` and `blk: <reason>` (ip4|ip6|path|rule) so the analyst counts SDK blocks apart
    from your app's own 403s.
-4. Serves `/_cam/b.js` (the beacon, first-party — no third-party domain for ad-blockers or CSP
+4. Serves `/_cam/b.js` (the beacon, first-party, with no third-party domain for ad-blockers or CSP
    to break) and relays `/_cam/fp` posts to ingest with the resolved client IP.
 5. Otherwise: sets `x-rid` + the `_sfp` session cookie (kept when the app later replaces
    Set-Cookie through `setHeader`/`writeHead`), and on response-finish ships one batched,
@@ -82,7 +84,7 @@ full path, and its own endpoints answer under the prefix.
 ## Custom rules
 
 Your Rules page holds one ordered list per project, and this SDK walks it before the allow,
-block and challenge lists. First match wins — the order *is* the precedence — and each rule
+block and challenge lists. First match wins (the order *is* the precedence), and each rule
 carries one of four actions:
 
 | action | what this SDK does | on the event |
@@ -94,7 +96,7 @@ carries one of four actions:
 
 A skip rule also carries a *record matches* flag, which only the analyst reads: a recorded skip
 is still scored and shows on your dashboard as Allowed, an unrecorded one is dropped before
-scoring. Either way the request passes here, unstamped — the built-in Allow-list is a skip rule
+scoring. Either way the request passes here, unstamped. The built-in Allow-list is a skip rule
 with recording on.
 
 A rule block also names the row that decided, so the response says which rule to edit:
@@ -141,7 +143,7 @@ camada.track(request.raw, 'login_failed', { user: email });    // Fastify
 camada.track(ctx.req, 'login_failed', { user: email });        // Koa
 ```
 
-The event name is free-form, but the analyst's app-context rules read a fixed vocabulary — use these names
+The event name is free-form, but the analyst's app-context rules read a fixed vocabulary. Use these names
 and the credential-stuffing, password-spray, account-aggregation, signup-velocity, carding and coupon rules
 fire on your app's own truth instead of path heuristics:
 
@@ -207,8 +209,8 @@ handshake your library then rejects still ships `st: 101`.
 
 ## Operational notes
 
-- `CAMADA_DISABLED=1` — kill switch, checked per request.
-- `CAMADA_SERVERLESS=1` — lazy snapshot refresh (no interval timer); cold invocations fail
+- `CAMADA_DISABLED=1`: kill switch, checked per request.
+- `CAMADA_SERVERLESS=1`: lazy snapshot refresh (no interval timer); cold invocations fail
   open and catch up asynchronously. Each request's event (and every `track()` row) is POSTed as
   the response finishes instead of waiting for the 15 s batch timer, which a frozen function
   never runs. Pass the platform's `waitUntil` so the invocation stays alive for that POST:
@@ -236,3 +238,14 @@ handshake your library then rejects still ships `st: 101`.
 npm install && npm run build && npm test && npm run check
 ```
 Sibling checkouts of `camada-core` and `camada-browser` must exist (file: deps).
+
+## Docs and links
+
+Read the Node guides on [camada.app](https://www.camada.app/docs).
+
+- [Express guide](https://www.camada.app/docs/quickstart/express): mount the SDK, read client IPs, and track login results.
+- [Fastify](https://www.camada.app/docs/quickstart/fastify), [NestJS](https://www.camada.app/docs/quickstart/nest), and [Koa](https://www.camada.app/docs/quickstart/koa): setup steps for each Node adapter.
+- [Custom rules](https://www.camada.app/docs/rules) and [Challenge](https://www.camada.app/docs/challenge): order your rules and tune browser checks.
+- [Bot detection](https://www.camada.app/bot-detection): see how snapshots, beacons, and `track()` catch bots.
+- [Bot signal test](https://www.camada.app/tools/bot-test): check live browser, HTTP, and TLS signals from your client.
+- [Pricing](https://www.camada.app/pricing): compare the free tier and paid plans.
