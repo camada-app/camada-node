@@ -6,9 +6,9 @@
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { randomUUID, webcrypto } from 'node:crypto';   // webcrypto handed to hashUserId explicitly, so the hash never depends on which global the host exposes
 import {
-  SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, isTrustedPeer, hashUserId, guarded, logRateLimited,
+  SnapshotClient, EventQueue, buildWireEvent, beaconRow, resolveClientIp, isTrustedPeer, hashUserId, guarded, logRateLimited,
   challengeCookie, safeReturnTo, wantsHtml, CHALLENGE_COOKIE,
-  TAP_NODE, REQUEST_ROW_KEYS, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
+  TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { isIP } from 'node:net';
 import iife from '@camada/browser/iife-string';
@@ -411,9 +411,7 @@ export class Camada {
       res.writeHead(204, { 'cache-control': 'no-store' });
       res.end();
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Buffer.isBuffer(parsed)) return;
-      const row: Record<string, unknown> = { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_NODE, rts: Date.now() };
-      for (const k of REQUEST_ROW_KEYS) delete row[k];
-      this.enqueue(row);
+      this.enqueue(beaconRow(parsed as Record<string, unknown>, ip, TAP_NODE));
     };
     const fromText = (text: string) => { try { return JSON.parse(text) as unknown; } catch { return null; } };
     if (req.readableEnded) {
