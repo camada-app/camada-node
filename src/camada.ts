@@ -9,7 +9,7 @@ import {
   SnapshotClient, EventQueue, buildWireEvent, beaconRow, resolveClientIp, isTrustedPeer, hashUserId, guarded, logRateLimited,
   challengeCookie, safeReturnTo, wantsHtml, CHALLENGE_COOKIE,
   TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
-  requestTokenHash, resolveTokenHash, type TokenHashConfig, type TokenHashOptions,
+  requestTokenHash, resolveTokenHash, warnIgnoredTokenHeader, type TokenHashConfig, type TokenHashOptions,
 } from '@camada/core';
 import { isIP } from 'node:net';
 import iife from '@camada/browser/iife-string';
@@ -196,7 +196,7 @@ export class Camada {
     this.tlsxHeader = parseTlsxHeader(opts.tlsxHeader) ?? this.env?.tlsxHeader ?? null;
     if (!this.env) return;                       // unconfigured: every entry point no-ops
     if (this.envSource.CAMADA_DISABLED === '1') return;   // killed at boot: no poll timer, no exit hooks, truly silent
-    if (this.tokenHash?.ignoredHeader) guarded(() => console.warn('[camada] token header ignored; using Authorization only'), undefined);
+    warnIgnoredTokenHeader(this.tokenHash);
     this.snap = new SnapshotClient({
       url: this.env.snapshotUrl, token: this.env.snapToken,
       mode: this.env.serverless ? 'lazy' : 'timer',
