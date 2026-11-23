@@ -9,6 +9,7 @@ import {
   SnapshotClient, EventQueue, buildWireEvent, beaconRow, resolveClientIp, isTrustedPeer, hashUserId, guarded, logRateLimited,
   challengeCookie, safeReturnTo, wantsHtml, CHALLENGE_COOKIE,
   TAP_NODE, type ChallengeKit, type SnapshotVersion, type TrustedProxyConfig, type WireEvent,
+  requestTokenHash, resolveTokenHash, type TokenHashConfig, type TokenHashOptions,
 } from '@camada/core';
 import { isIP } from 'node:net';
 import iife from '@camada/browser/iife-string';
@@ -33,7 +34,7 @@ function isLoopbackPeer(peer: string): boolean {
 const TLSX_RE = /^[A-Za-z0-9+/=_-]+$/;
 const ATTACHED = Symbol.for('camada.attached');   // one wrap per server, however often attach() is called
 
-export interface CamadaOptions {
+export interface CamadaOptions extends TokenHashOptions {
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;      // threaded into snapshot client, event queue, and the fp relay (tests)
   refreshMs?: number;
@@ -43,8 +44,8 @@ export interface CamadaOptions {
   tlsxHeader?: string;           // header carrying the TLS fingerprint (CAMADA_TLSX_HEADER); read only from a trusted-proxy peer in cidrs mode
   challengePath?: string;        // where that page posts its solution (default /__camada/challenge)
   snapshotVersion?: SnapshotVersion;   // 5 (default) also carries the tenant's ordered custom rules; 4 the allow/challenge sides only; 3 opts out of both
-  /** With CAMADA_SERVERLESS=1: handed every per-request event flush and snapshot refresh, so the
-   *  platform keeps the invocation alive until they finish (e.g. `waitUntil` from `@vercel/functions`). */
+  /** With CAMADA_SERVERLESS=1: handed event flushes, snapshot refreshes and opt-in credential hashes,
+   *  so the platform keeps the invocation alive (e.g. `waitUntil` from `@vercel/functions`). */
   waitUntil?: (p: Promise<unknown>) => void;
 }
 
@@ -177,10 +178,12 @@ export class Camada {
   private readonly kit: ChallengeKit | null = null;
   private readonly envSource: Record<string, string | undefined>;
   private readonly tlsxHeader: string | null;
+  private readonly tokenHash: TokenHashConfig | null;
   private readonly waitUntil?: (p: Promise<unknown>) => void;
 
   constructor(opts: CamadaOptions = {}) {
     this.envSource = opts.env ?? process.env;
+    this.tokenHash = resolveTokenHash(opts, this.envSource);
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.waitUntil = opts.waitUntil;
     this.scriptPath = opts.scriptPath ?? SCRIPT_PATH;
@@ -193,6 +196,7 @@ export class Camada {
     this.tlsxHeader = parseTlsxHeader(opts.tlsxHeader) ?? this.env?.tlsxHeader ?? null;
     if (!this.env) return;                       // unconfigured: every entry point no-ops
     if (this.envSource.CAMADA_DISABLED === '1') return;   // killed at boot: no poll timer, no exit hooks, truly silent
+    if (this.tokenHash?.ignoredHeader) guarded(() => console.warn('[camada] token header ignored; using Authorization only'), undefined);
     this.snap = new SnapshotClient({
       url: this.env.snapshotUrl, token: this.env.snapToken,
       mode: this.env.serverless ? 'lazy' : 'timer',
@@ -259,6 +263,23 @@ export class Camada {
     this.flushFor(req);
   }
 
+  private enqueueRequestRow(ev: WireEvent, req: CamadaRequest, flushReq?: CamadaRequest): void {
+    if (!this.tokenHash) { this.enqueue(ev, flushReq); return; }
+    const raw = req.rawHeaders || [];
+    const get = (name: string) => {
+      for (let i = 0; i + 1 < raw.length; i += 2) {
+        if (raw[i].toLowerCase() === name) return raw[i + 1];
+      }
+      return null;
+    };
+    const p = requestTokenHash(get, this.tokenHash, this.env!.ingestToken, (globalThis.crypto ?? webcrypto).subtle)
+      .then((tk) => {
+        if (tk !== null) ev.tk = tk;
+        this.enqueue(ev, flushReq);
+      }).catch(logRateLimited);
+    if (this.env?.serverless) guarded(() => this.waitUntil?.(p), undefined);
+  }
+
   /** Serverless: start the POST now and hand it to waitUntil. Never throws. */
   private flushFor(req?: CamadaRequest): void {
     const q = this.queue!;
@@ -301,7 +322,7 @@ export class Camada {
       ev.st = 403;   // blocked requests always ship: silent expiry makes blocks oscillate
       ev.blk = v.reason;   // SDK-01: the reason rides the event so the analyst counts SDK blocks, not the app's own 403s ('rule' when a rule decided)
       if (v.rule) ev.rl = v.rule;
-      this.enqueue(ev);
+      this.enqueueRequestRow(ev, req);
       return true;
     }
     // `warn` passes the request and only marks its event (below, on response-finish); a skip
@@ -382,7 +403,7 @@ export class Camada {
       if (req.route?.path) ev.rt = String(req.route.path);
       if (req.camada?.wrn) ev.wrn = req.camada.wrn;   // §D3: the warn rule that let this request through
       if (req.camadaSignalled) ev.chs = 1;   // challenge signalled (camada-all-82ar)
-      this.enqueue(ev, req);
+      this.enqueueRequestRow(ev, req, req);
     }, undefined);
     res.once('finish', ship);
     res.once('close', ship);
@@ -451,7 +472,7 @@ export class Camada {
         { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
       ev.st = 403;
       ev.blk = 'challenge';
-      this.enqueue(ev);
+      this.enqueueRequestRow(ev, req);
     }, undefined);
   }
 
@@ -479,7 +500,7 @@ export class Camada {
       const ev = this.buildEvent(req, this.challengeAction(req), '', ip, { rid: randomUUID(), sid: this.sessionOf(req), newSession: false });
       ev.st = 200;
       ev.ch = 1;   // challenge passed (contract §A3 ingest field)
-      this.enqueue(ev);
+      this.enqueueRequestRow(ev, req);
     }, undefined));
   }
 
@@ -521,7 +542,7 @@ export class Camada {
     ev.ts = t0;
     ev.st = 101;
     ev.dur = Date.now() - t0;
-    this.enqueue(ev);
+    this.enqueueRequestRow(ev, req);
   }
 
   /** Serve the challenge for this request on demand — for a route the app wants to gate itself

@@ -77,9 +77,25 @@ full path, and its own endpoints answer under the prefix.
    to break) and relays `/_cam/fp` posts to ingest with the resolved client IP.
 5. Otherwise: sets `x-rid` + the `_sfp` session cookie (kept when the app later replaces
    Set-Cookie through `setHeader`/`writeHead`), and on response-finish ships one batched,
-   redacted event (Authorization/Cookie values never leave the process; credential-looking
-   query values are scrubbed; see @camada/core). A client that disconnects mid-response still
-   ships its one event, with the status set so far and `dur` up to the disconnect.
+   redacted event. It records the Authorization scheme, and with the opt-in `tokenHash` it also
+   ships a keyed credential hash as `tk`. Authorization and Cookie values stay in the process,
+   and @camada/core scrubs credential-looking query values. A client that disconnects mid-response
+   still ships its one event with the status set so far and `dur` up to the disconnect.
+
+## Credential hash (opt-in, off by default)
+
+Set `tokenHash: true` or `CAMADA_TOKEN_HASH=1` to include `tk` on request events with a usable
+credential. An explicit `tokenHash: false` wins over the env setting. `tk` is the first 32 hex
+characters of HMAC-SHA256, keyed with your ingest token, over `tok:` plus the credential. The
+credential is the part of `Authorization` after the scheme (e.g. the Bearer token). To use
+another header, set `tokenHeader: 'x-api-key'` or `CAMADA_TOKEN_HEADER=x-api-key`. That header's whole
+value takes precedence when it gives a usable credential. The credential itself never leaves
+the process. A value shorter than 8 characters or outside printable ASCII produces no `tk`.
+
+camada uses `tk` to spot one credential replayed from many clients. Turn it on when your
+credentials are random tokens or API keys. Keep it off for human passwords over Basic auth
+because anyone holding both your events and your ingest token could test password guesses
+against the hash. Rotating the ingest token changes every `tk`.
 
 ## Custom rules
 
@@ -213,7 +229,8 @@ handshake your library then rejects still ships `st: 101`.
 - `CAMADA_SERVERLESS=1`: lazy snapshot refresh (no interval timer); cold invocations fail
   open and catch up asynchronously. Each request's event (and every `track()` row) is POSTed as
   the response finishes instead of waiting for the 15 s batch timer, which a frozen function
-  never runs. Pass the platform's `waitUntil` so the invocation stays alive for that POST:
+  never runs. Pass the platform's `waitUntil` to keep the invocation alive for that POST and
+  any opt-in credential hashing:
   ```js
   import { waitUntil } from '@vercel/functions';
   const camada = createCamada({ waitUntil });   // also holds the lazy snapshot refresh open
