@@ -411,7 +411,7 @@ export class Camada {
       res.writeHead(204, { 'cache-control': 'no-store' });
       res.end();
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Buffer.isBuffer(parsed)) return;
-      this.enqueue(beaconRow(parsed as Record<string, unknown>, ip, TAP_NODE));
+      this.enqueue(beaconRow(parsed, ip, TAP_NODE));
     };
     const fromText = (text: string) => { try { return JSON.parse(text) as unknown; } catch { return null; } };
     if (req.readableEnded) {
