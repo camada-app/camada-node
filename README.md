@@ -87,10 +87,11 @@ full path, and its own endpoints answer under the prefix.
 Set `tokenHash: true` or `CAMADA_TOKEN_HASH=1` to include `tk` on request events with a usable
 credential. An explicit `tokenHash: false` wins over the env setting. `tk` is the first 32 hex
 characters of HMAC-SHA256, keyed with your ingest token, over `tok:` plus the credential. The
-credential is the part of `Authorization` after the scheme (e.g. the Bearer token). To use
-another header, set `tokenHeader: 'x-api-key'` or `CAMADA_TOKEN_HEADER=x-api-key`. That header's whole
-value takes precedence when it gives a usable credential. The credential itself never leaves
-the process. A value shorter than 8 characters or outside printable ASCII produces no `tk`.
+credential is the part of `Authorization` after the scheme (for example, the Bearer token),
+or the whole value when there is no scheme. Set `tokenHeader: 'x-api-key'` or
+`CAMADA_TOKEN_HEADER=x-api-key` to use that header's whole value when it gives a usable
+credential. Otherwise, the SDK falls back to `Authorization`. The credential itself never
+leaves the process. A value shorter than 8 characters or outside printable ASCII produces no `tk`.
 
 camada uses `tk` to spot one credential replayed from many clients. Turn it on when your
 credentials are random tokens or API keys. Keep it off for human passwords over Basic auth
