@@ -155,6 +155,35 @@ it('serves and ships without tk or credential logs when signing rejects', async 
   expect(error.mock.calls.flat().map(String).join(' ')).not.toContain(credential);
 });
 
+it('starts the capture POST just after finish in serverless mode without waitUntil', async () => {
+  const subtle = (globalThis.crypto ?? webcrypto).subtle;
+  const importKey = subtle.importKey.bind(subtle);
+  const imported = vi.spyOn(subtle, 'importKey').mockImplementationOnce(async (...args) => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return importKey(...args);
+  });
+  const signed = vi.spyOn(subtle, 'sign');
+  const a = fakeAnalyst();
+  const engine = engineWith(a, { CAMADA_KEY: 'ct_test_fixture_key.snap-test', CAMADA_SERVERLESS: '1' }, { tokenHash: true });
+  cleanup.push(() => engine.stop());
+  await loaded(engine);
+  const app = await serve(async (req, res) => {
+    if (engine.handle(req, res)) return;
+    // Give hashing that started during handle() time to settle while the app runs.
+    await imported.mock.results[0]?.value;
+    await signed.mock.results[0]?.value;
+    res.end('ok');
+  });
+  cleanup.push(() => app.close());
+  const postedAtFinish = new Promise<unknown[]>((resolve) => {
+    app.server.prependOnceListener('request', (_req, res) => {
+      res.once('finish', () => setImmediate(() => resolve(a.events.flat())));
+    });
+  });
+  expect(await (await fetch(app.url, { headers: auth })).text()).toBe('ok');
+  expect(await postedAtFinish).toEqual([expect.objectContaining({ st: 200, tk })]);
+});
+
 it('hands pending hashing to waitUntil in serverless mode', async () => {
   const subtle = (globalThis.crypto ?? webcrypto).subtle;
   const realSign = subtle.sign.bind(subtle);
