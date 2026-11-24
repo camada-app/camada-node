@@ -91,7 +91,7 @@ credential is the part of `Authorization` after the scheme (for example, the Bea
 or the whole value when there is no scheme. Set `tokenHeader: 'x-api-key'` or
 `CAMADA_TOKEN_HEADER=x-api-key` to use that header's whole value when it gives a usable
 credential. Otherwise, the SDK falls back to `Authorization`. The credential itself never
-leaves the process. A value shorter than 8 characters or outside printable ASCII produces no `tk`.
+leaves the process. The credential, after any scheme, must contain at least 8 printable ASCII characters; otherwise no `tk` is sent.
 
 camada uses `tk` to spot one credential replayed from many clients. Turn it on when your
 credentials are random tokens or API keys. Keep it off for human passwords over Basic auth
