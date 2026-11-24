@@ -280,12 +280,12 @@ export class Camada {
 
   private enqueueRequestRow(ev: WireEvent, hash: Promise<string | null> | undefined, req?: CamadaRequest): void {
     if (!hash) { this.enqueue(ev, req); return; }
-    const p = hash.then((tk) => {
+    if (req) req.camadaOpen = true;   // open until the row is queued, so a track() meanwhile rides its flush
+    const p = this.queue!.addPending(hash.then((tk) => {
       if (tk !== null) ev.tk = tk;
       if (req) req.camadaOpen = false;
       this.enqueue(ev, req);
-    }).catch(logRateLimited);
-    this.queue!.addPending(p);
+    }).catch(logRateLimited));
     if (this.env?.serverless) guarded(() => this.waitUntil?.(p), undefined);
   }
 
@@ -401,10 +401,9 @@ export class Camada {
     let shipped = false;
     req.camadaOpen = true;
     const ship = () => guarded(() => {
-      if (shipped) return;
+      if (shipped) return;   // 'close' after 'finish': the capture may still be hashing, so camadaOpen stays as it is
       shipped = true;
-      const hash = req.camada?.tk;
-      if (!hash || req.camadaChallenged) req.camadaOpen = false;
+      req.camadaOpen = false;
       // serveChallenge() may have answered from inside the app, and it already shipped the
       // `blk: "challenge"` row — one request, one event. A track() row queued while the
       // response was open still needs this finish flush (serverless).
@@ -416,7 +415,7 @@ export class Camada {
       if (req.route?.path) ev.rt = String(req.route.path);
       if (req.camada?.wrn) ev.wrn = req.camada.wrn;   // §D3: the warn rule that let this request through
       if (req.camadaSignalled) ev.chs = 1;   // challenge signalled (camada-all-82ar)
-      this.enqueueRequestRow(ev, hash, req);
+      this.enqueueRequestRow(ev, req.camada?.tk, req);
     }, undefined);
     res.once('finish', ship);
     res.once('close', ship);
