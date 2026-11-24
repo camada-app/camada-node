@@ -246,8 +246,8 @@ handshake your library then rejects still ships `st: 101`.
   match only with the opt-in `CAMADA_TLSX_HEADER` (see "TLS fingerprint behind Cloudflare");
   without it they fail open too.
 - `await camada.stop()` in your own graceful shutdown stops polling and the event queue. It
-  returns a promise that settles once queued rows (a drain in flight, or rows held by an ingest
-  429) are sent, or counted as dropped if the send fails; it never rejects.
+  returns a promise that waits for rows still being hashed and settles once queued rows are sent
+  or counted as dropped, including rows in flight or held by an ingest 429. It never rejects.
 - Memory: ~5 MB per loaded snapshot.
 
 ## Develop
