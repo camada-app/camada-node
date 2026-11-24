@@ -1,5 +1,5 @@
 import { createHash, webcrypto } from 'node:crypto';
-import { request } from 'node:http';
+import { request, type IncomingMessage } from 'node:http';
 import { afterEach, expect, it, vi } from 'vitest';
 import { powOk } from '@camada/core';
 import { BLOCKED_IP, CHALLENGED_IP, engineWith, fakeAnalyst, loaded, serve } from './harness.js';
@@ -206,4 +206,52 @@ it('hands pending hashing to waitUntil in serverless mode', async () => {
   expect(held).toHaveLength(2);
   await held[1];
   expect(rows()).toEqual([expect.objectContaining({ st: 200, tk })]);
+});
+
+it('drains a timer-mode capture whose hash is pending when stop() starts', async () => {
+  const { app, engine, rows } = await setup({ tokenHash: true });
+  const subtle = (globalThis.crypto ?? webcrypto).subtle;
+  const sign = subtle.sign.bind(subtle);
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  vi.spyOn(subtle, 'sign').mockImplementationOnce(async (...args) => {
+    await pending;
+    return sign(...args);
+  });
+  let stopping: Promise<void>;
+  try {
+    expect(await (await fetch(app.url, { headers: auth })).text()).toBe('ok');
+    stopping = engine.stop();
+  } finally {
+    release();
+  }
+  await stopping;
+  expect(rows()).toEqual([expect.objectContaining({ st: 200, tk })]);
+});
+
+it('batches a serverless track after finish with the pending capture hash', async () => {
+  const a = fakeAnalyst();
+  const { app, engine } = await setup({ tokenHash: true }, { CAMADA_SERVERLESS: '1' }, a);
+  const subtle = (globalThis.crypto ?? webcrypto).subtle;
+  const sign = subtle.sign.bind(subtle);
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  vi.spyOn(subtle, 'sign').mockImplementationOnce(async (...args) => {
+    await pending;
+    return sign(...args);
+  });
+  let req!: IncomingMessage;
+  app.server.once('request', (incoming) => { req = incoming; });
+  try {
+    expect(await (await fetch(app.url, { headers: auth })).text()).toBe('ok');
+    engine.track(req, 'login');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    release();
+  }
+  await vi.waitFor(() => expect(a.events.flat()).toHaveLength(2));
+  expect(a.events).toEqual([[
+    expect.objectContaining({ et: 'login' }),
+    expect.objectContaining({ st: 200, tk }),
+  ]]);
 });

@@ -59,7 +59,7 @@ interface CamadaRequest extends IncomingMessage {
   route?: { path?: string };     // Express fills this after routing
   camadaChallenged?: boolean;    // serveChallenge() already shipped this request's event
   camadaSignalled?: boolean;     // a non-HTML request passed under a challenge: x-camada-challenge header + `chs: 1` on its event
-  camadaOpen?: boolean;          // its event ships on response finish: a track() row until then rides that flush
+  camadaOpen?: boolean;          // a track() row before its capture is queued rides the capture flush
   camadaTracks?: Promise<void>[];   // track() rows still hashing (serverless: the finish flush waits for them)
   camadaPrefix?: string;         // the mount prefix seen when camada ran (scriptTag() runs later, where req.url is whole again)
 }
@@ -282,8 +282,10 @@ export class Camada {
     if (!hash) { this.enqueue(ev, req); return; }
     const p = hash.then((tk) => {
       if (tk !== null) ev.tk = tk;
+      if (req) req.camadaOpen = false;
       this.enqueue(ev, req);
     }).catch(logRateLimited);
+    this.queue!.addPending(p);
     if (this.env?.serverless) guarded(() => this.waitUntil?.(p), undefined);
   }
 
@@ -399,9 +401,10 @@ export class Camada {
     let shipped = false;
     req.camadaOpen = true;
     const ship = () => guarded(() => {
-      req.camadaOpen = false;
       if (shipped) return;
       shipped = true;
+      const hash = req.camada?.tk;
+      if (!hash || req.camadaChallenged) req.camadaOpen = false;
       // serveChallenge() may have answered from inside the app, and it already shipped the
       // `blk: "challenge"` row — one request, one event. A track() row queued while the
       // response was open still needs this finish flush (serverless).
@@ -413,7 +416,7 @@ export class Camada {
       if (req.route?.path) ev.rt = String(req.route.path);
       if (req.camada?.wrn) ev.wrn = req.camada.wrn;   // §D3: the warn rule that let this request through
       if (req.camadaSignalled) ev.chs = 1;   // challenge signalled (camada-all-82ar)
-      this.enqueueRequestRow(ev, req.camada?.tk, req);
+      this.enqueueRequestRow(ev, hash, req);
     }, undefined);
     res.once('finish', ship);
     res.once('close', ship);
@@ -602,6 +605,7 @@ export class Camada {
         const uid = data?.user ? await hashUserId(data.user, this.env!.ingestToken, (globalThis.crypto ?? webcrypto).subtle) : null;
         this.enqueue({ tap: TAP_NODE, et: event, uid, rid: ctx?.rid ?? null, sid: ctx?.sid ?? null, ip: ctx?.ip ?? null, ts: Date.now() }, r);
       })().catch(logRateLimited);
+      this.queue.addPending(row);
       if (r.camadaOpen) (r.camadaTracks ??= []).push(row);
     }, undefined);
   }
@@ -613,8 +617,8 @@ export class Camada {
     };
   }
 
-  /** Stops polling and the event queue. The promise settles once rows still queued behind a drain
-   *  in flight or a 429 hold are sent (or counted dropped); it never rejects. */
+  /** Stops polling and the event queue. Waits for pending row builders and for rows behind them,
+   *  a drain in flight or a 429 hold to ship or count as dropped. Never rejects. */
   stop(): Promise<void> {
     this.snap?.stop();
     return this.queue?.stop() ?? Promise.resolve();
